@@ -15,7 +15,7 @@ function run_simulation(grid::Grid, initial_state::State, hydro_data::Hydrodynam
 
     @showprogress "Simulating..." for time in time_range
         update_hydrodynamics!(state, grid, hydro_data, time)
-        #horizontal_transport!(state, grid, dt)
+        horizontal_transport!(state, grid, dt)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, dt)
     end

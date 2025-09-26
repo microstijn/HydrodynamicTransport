@@ -6,7 +6,7 @@ using Revise
 using HydrodynamicTransport
 using UnicodePlots
 
-run_all_tests()
+run_all_tests();
 
 
 

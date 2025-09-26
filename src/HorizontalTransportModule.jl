@@ -4,6 +4,27 @@ export horizontal_transport!
 
 using ..ModelStructs
 
+
+"""
+    horizontal_transport!(state::State, grid::Grid, dt::Float64)
+
+Updates all tracer concentrations due to horizontal advection.
+
+This is the main exported function. It iterates through each tracer in the state
+and applies the underlying advection schemes in the x and y directions.
+"""
+function horizontal_transport!(state::State, grid::Grid, dt::Float64)
+    # Loop over every tracer defined in the state (e.g., :C, :virus_free, etc.)
+    for tracer_name in keys(state.tracers)
+        C = state.tracers[tracer_name]
+        
+        # Apply the transport operators sequentially for this tracer
+        advect_x!(C, state.u, grid, dt)
+        advect_y!(C, state.v, grid, dt)
+    end
+    return nothing
+end
+
 # -----------------------------------------------------------------------------
 # Coefficient and Stencil Helpers
 # -----------------------------------------------------------------------------

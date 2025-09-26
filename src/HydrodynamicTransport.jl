@@ -12,7 +12,7 @@ include("TestCasesModule.jl")
 
 
 using .ModelStructs
-export Grid, State, HydrodynamicData
+export Grid, State, HydrodynamicData, PointSource
 
 using .GridModule
 export initialize_grid
@@ -28,6 +28,7 @@ using .HydrodynamicsModule
 
 using .TimeSteppingModule
 export run_simulation
+export run_and_store_simulation
 
 using .TestCasesModule
 export run_all_tests

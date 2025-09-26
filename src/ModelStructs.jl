@@ -2,16 +2,12 @@
 
 module ModelStructs
 
-export Grid, State, HydrodynamicData 
+export Grid, State, HydrodynamicData, PointSource
 
 using StaticArrays
+using Base: @kwdef # Import the macro
 
-"""
-    Grid
-
-A struct to hold all the static grid information for the simulation.
-This represents the Arakawa 'C' staggered grid.
-"""
+# Grid struct remains the same...
 struct Grid
     dims::SVector{3, Int}
     x::Array{Float64, 3}
@@ -24,11 +20,7 @@ struct Grid
     mask::Array{Bool, 3}
 end
 
-"""
-    State
-
-A struct to hold the dynamic variables of the simulation that change over time.
-"""
+# State struct remains the same...
 struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
     u::Array{Float64, 3}
@@ -40,16 +32,19 @@ struct State
     uvb::Array{Float64, 3}
 end
 
-"""
-    HydrodynamicData
-
-A struct to hold information about the external hydrodynamic data source,
-typically a NetCDF file.
-"""
+# HydrodynamicData struct remains the same...
 struct HydrodynamicData
     filepath::String
-    # In a real implementation, we would add fields for variable name mappings,
-    # a dataset object from NCDatasets, and time coordinate information.
 end
+
+# --- FIX: Add @kwdef to enable keyword arguments ---
+@kwdef struct PointSource
+    i::Int
+    j::Int
+    k::Int
+    tracer_name::Symbol
+    influx_rate::Function
+end
+
 
 end # module ModelStructs

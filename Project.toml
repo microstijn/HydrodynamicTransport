@@ -1,0 +1,20 @@
+name = "HydrodynamicTransport"
+uuid = "31f92968-7619-4666-bd31-400a5b4b3d2d"
+authors = ["Stijn Peeters <58211004+microstijn@users.noreply.github.com>"]
+version = "0.1.0"
+
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
+
+[compat]
+Dates = "1.11.0"
+Logging = "1.11.0"
+Revise = "3.9.0"
+StaticArrays = "1.9.15"
+Test = "1.11.0"
+UnicodePlots = "3.8.1"

@@ -6,6 +6,10 @@ using Revise
 using HydrodynamicTransport
 using UnicodePlots
 
+run_all_tests()
+
+
+
 # init grid
 g = initialize_grid(10, 10, 5, 100.0, 100.0, 20.0);
 
@@ -34,6 +38,7 @@ begin
     tracer_names = (:C_dissolved, :C_sorbed);
     state = initialize_state(grid, tracer_names);
     state.tracers
+
     # setup fake data
     center_x = Lx / 4 # Start the blob on the left side
     center_y = Ly / 2
@@ -60,20 +65,19 @@ begin
     end
 
 
-# set up speed of water flow
-state.u .= 0.5;  # Constant velocity to the right (0.5 m/s)
-state.v .= 0.0;  # No velocity in y
+    # set up speed of water flow
+    state.u .= 0.5;  # Constant velocity to the right (0.5 m/s)
+    state.v .= 0.0;  # No velocity in y
 
 
-# inital mass 
-initial_mass = sum(C .* grid.volume);
+    # inital mass 
+    initial_mass = sum(C .* grid.volume);
 
-p_initial = heatmap(C[:,:,1]', title="Initial State (Time = 0s)", colormap=:viridis)
-final_state = run_simulation(grid, state, start_time, end_time, dt);
-final_C = final_state.tracers[:C_dissolved];
-final_mass = sum(final_C .* grid.volume);
-p_final = heatmap(final_C[:,:,1]', title="Final State (Time = $(end_time)s)", colormap=:viridis)
+    p_initial = heatmap(C[:,:,1]', title="Initial State (Time = 0s)", colormap=:viridis);
+    final_state = run_simulation(grid, state, start_time, end_time, dt);
+    final_C = final_state.tracers[:C_dissolved];
+    final_mass = sum(final_C .* grid.volume);
+    p_final = heatmap(final_C[:,:,1]', title="Final State (Time = $(end_time)s)", colormap=:viridis);
 end
 
-p_initial
-p_final
+

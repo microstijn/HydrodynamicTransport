@@ -35,7 +35,12 @@ Helper function to solve the 1D advection-diffusion equation for all vertical co
 """
 function solve_vertical_column!(C, w, grid, dt, Kz)
     nx, ny, nz = grid.dims
-    
+
+    # if there is just a single Z layer, there should be no vertical movement. 
+    if nz <= 1
+        return nothing
+    end
+
     # Loop over each horizontal (i, j) position
     for j in 1:ny, i in 1:nx
         

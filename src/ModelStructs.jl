@@ -2,7 +2,7 @@
 
 module ModelStructs
 
-export Grid, State
+export Grid, State, HydrodynamicData 
 
 using StaticArrays
 
@@ -38,6 +38,18 @@ struct State
     salinity::Array{Float64, 3}
     tss::Array{Float64, 3}
     uvb::Array{Float64, 3}
+end
+
+"""
+    HydrodynamicData
+
+A struct to hold information about the external hydrodynamic data source,
+typically a NetCDF file.
+"""
+struct HydrodynamicData
+    filepath::String
+    # In a real implementation, we would add fields for variable name mappings,
+    # a dataset object from NCDatasets, and time coordinate information.
 end
 
 end # module ModelStructs

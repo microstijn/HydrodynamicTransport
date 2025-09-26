@@ -1,87 +1,139 @@
-# src/TestCases.jl
+# src/TestCasesModule.jl
 
 module TestCasesModule
 
 export run_all_tests
 
 using Test
-
-# Import functions from our own package modules
 using ..ModelStructs
 using ..GridModule
 using ..StateModule
+using ..SourceSinkModule
+using ..HydrodynamicsModule
+using ..HorizontalTransportModule
 using ..TimeSteppingModule
 
-# Helper function to calculate the center of mass of a tracer field
-function center_of_mass(grid, C)
+
+"""
+Helper function to calculate the center of mass of a tracer field.
+"""
+function center_of_mass(grid::Grid, C::Array{Float64, 3})
     total_mass = sum(C .* grid.volume)
-    return total_mass == 0 ? (0.0, 0.0) : (sum(grid.x .* C .* grid.volume) / total_mass, sum(grid.y .* C .* grid.volume) / total_mass)
+    if total_mass == 0.0
+        return (0.0, 0.0, 0.0)
+    end
+    com_x = sum(grid.x .* C .* grid.volume) / total_mass
+    com_y = sum(grid.y .* C .* grid.volume) / total_mass
+    com_z = sum(grid.z .* C .* grid.volume) / total_mass
+    return (com_x, com_y, com_z)
 end
+
+"""
+Helper function to set up a standard grid and simulation parameters for tests.
+"""
+function setup_test_case()
+    nx, ny, nz = 50, 50, 1
+    Lx, Ly, Lz = 1000.0, 1000.0, 10.0
+    grid = initialize_grid(nx, ny, nz, Lx, Ly, Lz)
+    
+    # Simulate for one full M2 tidal cycle (12.4 hours)
+    total_time = 12.4 * 3600.0
+    dt = 600.0 # 10-minute time step
+    
+    hydro_data = HydrodynamicData("placeholder_path.nc")
+    
+    return grid, hydro_data, total_time, dt
+end
+
 
 """
     run_all_tests()
 
-Runs the built-in test suite for the HydrodynamicTransport package.
-This function executes a series of tests to verify the correctness of the
-numerical schemes, including mass conservation and advection accuracy.
+Executes the full test suite for the HydrodynamicTransport model.
 """
 function run_all_tests()
     @testset "HydrodynamicTransport.jl Internal Tests" begin
         
-        # --- 1. Setup a standard test case ---
-        nx, ny, nz = 50, 50, 1
-        Lx, Ly, Lz = 1000.0, 1000.0, 10.0
-        grid = initialize_grid(nx, ny, nz, Lx, Ly, Lz)
+        @testset "Mass Conservation Under Dynamic Forcing" begin
+            grid, hydro_data, total_time, dt = setup_test_case()
+            
+            # This test uses a single, generic tracer :C
+            state = initialize_state(grid, (:C,))
+            C = state.tracers[:C]
 
-        total_time = 400.0
-        dt = 10.0
+            # Initialize a Gaussian patch in the center of the domain
+            Lx, Ly = 1000.0, 1000.0
+            center_x, center_y = Lx / 2, Ly / 2
+            width = Lx / 10
+            for k in 1:size(C, 3), j in 1:size(C, 2), i in 1:size(C, 1)
+                x = grid.x[i,j,k]
+                y = grid.y[i,j,k]
+                C[i,j,k] = exp(-((x - center_x)^2 / (2*width^2) + (y - center_y)^2 / (2*width^2)))
+            end
 
-        u_velocity = 0.75 # m/s
-        v_velocity = 0.5  # m/s
-
-        state = initialize_state(grid, (:C,))
-        C = state.tracers[:C]
-
-        center_x_initial = Lx / 4
-        center_y_initial = Ly / 4
-        width = Lx / 10
-        for k in 1:nz, j in 1:ny, i in 1:nx
-            x = grid.x[i,j,k]
-            y = grid.y[i,j,k]
-            C[i,j,k] = exp(-((x - center_x_initial)^2 / (2*width^2) + (y - center_y_initial)^2 / (2*width^2)))
-        end
-
-        state.u .= u_velocity
-        state.v .= v_velocity
-        
-        initial_mass = sum(C .* grid.volume)
-
-        # --- 2. Run the simulation ---
-        final_state = run_simulation(grid, state, 0.0, total_time, dt)
-        final_C = final_state.tracers[:C]
-
-        # --- 3. Perform Tests ---
-        
-        @testset "Mass Conservation" begin
+            initial_mass = sum(C .* grid.volume)
+            initial_com = center_of_mass(grid, C)
+            
+            # Run the full simulation with reversing tidal flow
+            final_state = run_simulation(grid, state, hydro_data, 0.0, total_time, dt)
+            final_C = final_state.tracers[:C]
             final_mass = sum(final_C .* grid.volume)
-            # Test that the final mass is approximately equal to the initial mass
-            @test isapprox(initial_mass, final_mass, rtol=1e-6)
+            final_com = center_of_mass(grid, final_C)
+            
+            # Test 1: The mass of the tracer should be conserved throughout the simulation.
+            # This is the most critical test of the transport scheme.
+            @test isapprox(initial_mass, final_mass, rtol=1e-9)
+
+            # Test 2: The patch should have moved. Because the flow is tidal, it might
+            # return near its start, so we check if the path length was non-trivial.
+            # A simple check is that the final center of mass is not identical to the start.
+            @test !isapprox(initial_com[1], final_com[1]) || !isapprox(initial_com[2], final_com[2])
         end
 
-        @testset "Center of Mass Advection" begin
-            expected_x_final = center_x_initial + u_velocity * total_time
-            expected_y_final = center_y_initial + v_velocity * total_time
+        @testset "Source/Sink Isolation" begin
+            # This test verifies the decay calculation in isolation from transport.
+            grid, _, _, dt = setup_test_case()
             
-            actual_x_final, actual_y_final = center_of_mass(grid, final_C)
+            tracer_names = (:C_dissolved, :C_sorbed)
+            state = initialize_state(grid, tracer_names)
+
+            initial_concentration = 100.0
+            state.tracers[:C_dissolved] .= initial_concentration
             
-            # Test that the blob moved to the correct location within a tolerance
-            # of one grid cell width.
-            dx = Lx / nx
-            dy = Ly / ny
-            @test isapprox(actual_x_final, expected_x_final, atol=dx)
-            @test isapprox(actual_y_final, expected_y_final, atol=dy)
+            decay_rate_per_second = 0.1 / (24 * 3600)
+            expected_final_concentration = initial_concentration * (1 - decay_rate_per_second * dt)
+
+            # We call the source-sink function directly to test ONLY its logic
+            SourceSinkModule.source_sink_terms!(state, grid, dt)
+            
+            final_C_dissolved = state.tracers[:C_dissolved]
+            
+            @test isapprox(final_C_dissolved[1, 1, 1], expected_final_concentration, rtol=1e-9)
         end
-    end
-end
+
+        @testset "Hydrodynamic Forcing Update" begin
+            # This test ensures the hydrodynamic update function is working correctly.
+            grid, hydro_data, _, _ = setup_test_case()
+            state = initialize_state(grid, (:C,))
+
+            # State starts with zero velocity
+            @test all(state.u .== 0.0)
+
+            # Call the update function for time t=0
+            time = 0.0
+            HydrodynamicsModule.update_hydrodynamics!(state, grid, hydro_data, time)
+
+            # Check if velocities have been updated from zero
+            @test !all(state.u .== 0.0)
+
+            # Check if the values match the analytical solution at t=0
+            expected_u = 0.5 * cos(0)
+            expected_v = 0.2 * sin(0) 
+            @test state.u[1,1,1] == expected_u
+            @test state.v[1,1,1] == expected_v
+        end
+
+    end # Main TestSet
+end # run_all_tests
 
 end # module TestCasesModule

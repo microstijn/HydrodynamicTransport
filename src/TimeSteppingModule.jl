@@ -6,6 +6,7 @@ export run_simulation
 
 using ..ModelStructs
 using ..HorizontalTransportModule
+using ..VerticalTransportModule 
 using Logging  
 using Dates
 
@@ -25,14 +26,8 @@ end
 
 
 # STUBBY STUBS
-
 function update_hydrodynamics!(state::State, grid::Grid, time::Float64)
     # TODO: Implement reading of velocity, temp, etc., from files for the given time.
-    return nothing
-end
-
-function vertical_transport!(state::State, grid::Grid, dt::Float64)
-    # TODO: Implement vertical advection and diffusion here.
     return nothing
 end
 

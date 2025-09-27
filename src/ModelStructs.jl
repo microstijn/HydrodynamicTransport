@@ -7,7 +7,6 @@ export Grid, State, HydrodynamicData, PointSource
 using StaticArrays
 using Base: @kwdef # Import the macro
 
-# Grid struct remains the same...
 struct Grid
     dims::SVector{3, Int}
     x::Array{Float64, 3}
@@ -20,7 +19,6 @@ struct Grid
     mask::Array{Bool, 3}
 end
 
-# State struct remains the same...
 struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
     u::Array{Float64, 3}
@@ -32,12 +30,23 @@ struct State
     uvb::Array{Float64, 3}
 end
 
-# HydrodynamicData struct remains the same...
+"""
+    HydrodynamicData
+
+A configuration struct that holds information about the external hydrodynamic data source.
+
+# Fields
+- `filepath::String`: The path or URL to the data file.
+- `var_map::Dict{Symbol, String}`: A dictionary that maps the model's internal, standardized
+  variable names (e.g., `:u`, `:v`, `:time`) to the specific variable names used
+  in the NetCDF file (e.g., `"water_u"`, `"water_v"`, `"ocean_time"`).
+"""
 struct HydrodynamicData
     filepath::String
+    var_map::Dict{Symbol, String}
 end
 
-# --- FIX: Add @kwdef to enable keyword arguments ---
+# Added @kwdef to enable keyword arguments
 @kwdef struct PointSource
     i::Int
     j::Int

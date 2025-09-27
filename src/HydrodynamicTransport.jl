@@ -9,6 +9,7 @@ include("SourceSinkModule.jl")
 include("Hydrodynamics.jl")
 include("TimeSteppingModule.jl")
 include("TestCasesModule.jl") 
+include("IntegrationTestsModule.jl")
 
 
 using .ModelStructs
@@ -32,5 +33,8 @@ export run_and_store_simulation
 
 using .TestCasesModule
 export run_all_tests
+
+using .IntegrationTestsModule
+export run_integration_tests
 
 end # module HydrodynamicTransport

@@ -1,45 +1,69 @@
-# src/State.jl
+# src/StateModule.jl
 
 module StateModule
 
 export initialize_state
 
 using ..ModelStructs
+using NCDatasets
+
+# This is the internal helper for getting dimensions from our grid structs
+_get_dims(grid::CartesianGrid) = grid.dims
+_get_dims(grid::CurvilinearGrid) = (grid.nx, grid.ny, grid.nz)
 
 """
-    initialize_state(grid::Grid, tracer_names::NTuple{N, Symbol} where N)
+    initialize_state(grid::AbstractGrid, tracer_names)
 
-Create a `State` object with tracer fields initialized to zero.
-
-This function allocates the memory for all dynamic fields in the simulation,
-ensuring they are consistent with the dimensions of the provided `grid`.
-Velocity fields are allocated with staggered dimensions appropriate for an
-Arakawa C-grid.
+Creates a `State` object for placeholder/test runs.
 """
-function initialize_state(grid::Grid, tracer_names::NTuple{N, Symbol} where N)
-    # Get grid dimensions for convenience
-    nx, ny, nz = grid.dims
+function initialize_state(grid::AbstractGrid, tracer_names::NTuple{N, Symbol} where N)
+    nx, ny, nz = _get_dims(grid)
+    tracers = Dict{Symbol, Array{Float64, 3}}()
+    for name in tracer_names
+        tracers[name] = zeros(Float64, nx, ny, nz)
+    end
+    u = zeros(Float64, nx + 1, ny, nz)
+    v = zeros(Float64, nx, ny + 1, nz)
+    w = zeros(Float64, nx, ny, nz + 1)
+    temperature = zeros(Float64, nx, ny, nz)
+    salinity = zeros(Float64, nx, ny, nz)
+    tss = zeros(Float64, nx, ny, nz)
+    uvb = zeros(Float64, nx, ny, nz)
+    return State(tracers, u, v, w, temperature, salinity, tss, uvb)
+end
 
-    # Initialize the tracers dictionary (at cell centers)
+"""
+    initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names)
+
+Creates a `State` object with dimensions that perfectly match the NetCDF file `ds`.
+This is the robust method for real data runs.
+"""
+function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
+    # Get tracer dimensions from the grid struct
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
     tracers = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
         tracers[name] = zeros(Float64, nx, ny, nz)
     end
 
-    # Initialize hydrodynamic and environmental fields.
-    # U, V, and W have staggered dimensions, with one extra element in their respective directions[cite: 1336].
-    u = zeros(Float64, nx + 1, ny, nz) # Located on x-faces (between i-1 and i)
-    v = zeros(Float64, nx, ny + 1, nz) # Located on y-faces (between j-1 and j)
-    w = zeros(Float64, nx, ny, nz + 1) # Located on z-faces (between k-1 and k)
+    # --- FIX: Get the EXACT staggered dimensions from the NetCDF file ---
+    u_dims = (ds.dim["xi_u"], ds.dim["eta_u"], ds.dim["s_rho"])
+    v_dims = (ds.dim["xi_v"], ds.dim["eta_v"], ds.dim["s_rho"])
+    w_dims = (ds.dim["xi_rho"], ds.dim["eta_rho"], ds.dim["s_w"])
 
-    # Scalar environmental fields remain at cell centers
+    u = zeros(Float64, u_dims)
+    v = zeros(Float64, v_dims)
+    w = zeros(Float64, w_dims)
+
+    # Scalar fields use the tracer dimensions
     temperature = zeros(Float64, nx, ny, nz)
     salinity = zeros(Float64, nx, ny, nz)
     tss = zeros(Float64, nx, ny, nz)
     uvb = zeros(Float64, nx, ny, nz)
 
-    # Construct and return the State object
     return State(tracers, u, v, w, temperature, salinity, tss, uvb)
 end
+
 
 end # module StateModule

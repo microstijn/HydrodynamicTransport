@@ -12,7 +12,8 @@ using ..TimeSteppingModule
 using ..SourceSinkModule
 using ..HydrodynamicsModule
 
-function center_of_mass(grid::Grid, C::Array{Float64, 3})
+# --- Helper function updated for CartesianGrid ---
+function center_of_mass(grid::CartesianGrid, C::Array{Float64, 3})
     total_mass = sum(C .* grid.volume)
     if total_mass == 0.0; return (0.0, 0.0, 0.0); end
     com_x = sum(grid.x .* C .* grid.volume) / total_mass
@@ -21,10 +22,12 @@ function center_of_mass(grid::Grid, C::Array{Float64, 3})
     return (com_x, com_y, com_z)
 end
 
+# --- Setup function updated to call the new grid constructor ---
 function setup_test_case()
     nx, ny, nz = 50, 50, 1
     Lx, Ly, Lz = 1000.0, 1000.0, 10.0
-    grid = initialize_grid(nx, ny, nz, Lx, Ly, Lz)
+    # --- FIX: Call the new constructor for the Cartesian grid ---
+    grid = initialize_cartesian_grid(nx, ny, nz, Lx, Ly, Lz)
     total_time = 3 * 3600.0
     dt = 30.0
     sources = PointSource[]
@@ -34,7 +37,7 @@ end
 function run_all_tests()
     @testset "HydrodynamicTransport.jl Internal Tests" begin
         
-        @testset "Mass Conservation Under Dynamic Forcing" begin
+        @testset "Mass Conservation Under Dynamic Forcing (Cartesian)" begin
             grid, sources, total_time, dt = setup_test_case()
             state = initialize_state(grid, (:C,))
             C = state.tracers[:C]
@@ -48,7 +51,7 @@ function run_all_tests()
             initial_mass = sum(C .* grid.volume)
             initial_com = center_of_mass(grid, C)
             
-            # This now calls the test version of run_simulation
+            # This call does not need to change. Julia will dispatch to the correct methods.
             final_state = run_simulation(grid, state, sources, 0.0, total_time, dt)
             final_C = final_state.tracers[:C]
             final_mass = sum(final_C .* grid.volume)
@@ -70,7 +73,7 @@ function run_all_tests()
             @test isapprox(final_C_dissolved[1, 1, 1], expected_final_concentration, rtol=1e-9)
         end
 
-        @testset "Point Source Behavior" begin
+        @testset "Point Source Behavior (Cartesian)" begin
             @testset "Constant Point Source adds mass correctly" begin
                 grid, _, total_time, dt = setup_test_case()
                 state = initialize_state(grid, (:C,))
@@ -98,13 +101,13 @@ function run_all_tests()
             end
         end
 
-        @testset "Hydrodynamic Forcing Update" begin
+        @testset "Hydrodynamic Forcing Update (Cartesian)" begin
             grid, _, _, _ = setup_test_case()
             state = initialize_state(grid, (:C,))
             @test all(state.u .== 0.0)
             time = 0.0
             
-            # Call the placeholder function directly to test it 
+            # This call does not need to change. Julia will dispatch to the correct placeholder.
             HydrodynamicsModule.update_hydrodynamics_placeholder!(state, grid, time)
             
             @test !all(state.u .== 0.0)

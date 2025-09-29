@@ -13,37 +13,78 @@ function find_time_index(time_dim_seconds::Vector{<:Real}, current_time_seconds:
     return index
 end
 
-# Placeholder functions are unchanged...
 function update_hydrodynamics_placeholder!(state::State, grid::CartesianGrid, time::Float64)
     nx, ny, _ = grid.dims
     dx = grid.x[2, 1, 1] - grid.x[1, 1, 1]; dy = grid.y[1, 2, 1] - grid.y[1, 1, 1]
     Lx = nx * dx; Ly = ny * dy
     center_x = Lx / 2; center_y = Ly / 2
-    max_speed = 0.2; decay_radius = Lx / 5
+
+    # Vortex parameters
+    period = 200.0
+    omega = 2π / period
+    
     u_centered = zeros(size(grid.x)); v_centered = zeros(size(grid.y))
     for k in 1:grid.dims[3], j in 1:ny, i in 1:nx
-        rx = grid.x[i, j, k] - center_x; ry = grid.y[i, j, k] - center_y
-        r = sqrt(rx^2 + ry^2)
-        speed = max_speed * (r / decay_radius) * exp(-0.5 * (r / decay_radius)^2)
-        if r > 0
-            u_centered[i, j, k] = -speed * (ry / r)
-            v_centered[i, j, k] =  speed * (rx / r)
-        end
+        rx = grid.x[i, j, k] - center_x
+        ry = grid.y[i, j, k] - center_y
+        
+        # Geographic (East/North) velocities for a vortex
+        u_east = -omega * ry
+        v_north = omega * rx
+        u_centered[i, j, k] = u_east
+        v_centered[i, j, k] = v_north
     end
-    for k in 1:grid.dims[3], j in 1:ny, i in 2:nx; state.u[i, j, k] = 0.5 * (u_centered[i-1, j, k] + u_centered[i, j, k]); end
-    for k in 1:grid.dims[3], i in 1:nx, j in 2:ny; state.v[i, j, k] = 0.5 * (v_centered[i, j-1, k] + v_centered[i, j, k]); end
+    
+    # Interpolate from cell centers to staggered faces
+    for k in 1:grid.dims[3], j in 1:ny, i in 2:nx
+        state.u[i, j, k] = 0.5 * (u_centered[i-1, j, k] + u_centered[i, j, k])
+    end
+    for k in 1:grid.dims[3], i in 1:nx, j in 2:ny
+        state.v[i, j, k] = 0.5 * (v_centered[i, j-1, k] + v_centered[i, j, k])
+    end
     state.w .= 0.0
 end
 
 function update_hydrodynamics_placeholder!(state::State, grid::CurvilinearGrid, time::Float64)
-    @warn "Placeholder hydrodynamics for CurvilinearGrid is not yet implemented. Setting velocities to zero."
-    state.u .= 0.0; state.v .= 0.0; state.w .= 0.0
+    # --- NEW IMPLEMENTATION for CurvilinearGrid vortex ---
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
+    # Use the mean of the coordinate ranges to find the center
+    center_x = (maximum(grid.lon_rho) + minimum(grid.lon_rho)) / 2
+    center_y = (maximum(grid.lat_rho) + minimum(grid.lat_rho)) / 2
+    
+    # Vortex parameters
+    period = 200.0
+    omega = 2π / period
+    
+    u_centered = zeros(Float64, nx, ny, nz)
+    v_centered = zeros(Float64, nx, ny, nz)
+
+    for k in 1:nz, j in 1:ny, i in 1:nx
+        # Geographic (East/North) velocities based on lon/lat coordinates
+        rx = grid.lon_rho[i, j] - center_x
+        ry = grid.lat_rho[i, j] - center_y
+        u_east = -omega * ry
+        v_north = omega * rx
+
+        # Rotate from geographic to grid-aligned using the grid angle
+        ang = grid.angle[i, j]
+        u_centered[i, j, k] = u_east * cos(-ang) - v_north * sin(-ang)
+        v_centered[i, j, k] = v_north * cos(-ang) + u_east * sin(-ang)
+    end
+
+    # Interpolate from cell centers to staggered faces
+    for k in 1:nz, j in 1:ny, i in 2:nx
+        state.u[i, j, k] = 0.5 * (u_centered[i-1, j, k] + u_centered[i, j, k])
+    end
+    for k in 1:nz, i in 1:nx, j in 2:ny
+        state.v[i, j, k] = 0.5 * (v_centered[i, j-1, k] + v_centered[i, j, k])
+    end
+    state.w .= 0.0
 end
 
 
 # --- Real Data Hydrodynamics ---
-
-# This method for AbstractGrid now correctly handles both Cartesian and Curvilinear cases
 function update_hydrodynamics!(state::State, grid::AbstractGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
     time_var_name = get(hydro_data.var_map, :time, "time")
     time_dim_raw = ds[time_var_name][:]
@@ -59,7 +100,6 @@ function update_hydrodynamics!(state::State, grid::AbstractGrid, ds::NCDataset, 
     
     nz = isa(grid, CartesianGrid) ? grid.dims[3] : grid.nz
 
-    # --- FIX: This loop now correctly handles 2D vs 3D for both grid types ---
     fields_to_load = Dict(
         state.u => :u, state.v => :v, state.w => :w,
         state.temperature => :temp, state.salinity => :salt
@@ -70,15 +110,12 @@ function update_hydrodynamics!(state::State, grid::AbstractGrid, ds::NCDataset, 
             nc_var_name = hydro_data.var_map[standard_name]
             if haskey(ds, nc_var_name)
                 if nz == 1
-                    # Read surface slice (last vertical index) for 2D mode
                     data_slice = ds[nc_var_name][:, :, end, time_idx]
                     target_field = view(state_field, :, :, 1)
-                    # Check for size mismatch before broadcasting
                     if size(target_field) == size(data_slice)
                         target_field .= coalesce.(data_slice, 0.0)
                     end
                 else
-                    # Read full 3D volume
                     data_slice = ds[nc_var_name][:, :, :, time_idx]
                     if size(state_field) == size(data_slice)
                         state_field .= coalesce.(data_slice, 0.0)

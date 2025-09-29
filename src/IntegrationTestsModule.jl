@@ -10,6 +10,7 @@ using ..GridModule
 using ..StateModule
 using ..TimeSteppingModule
 using ..HydrodynamicsModule
+using ..VectorOperationsModule # Added for the new test
 using NCDatasets
 
 function run_integration_tests()
@@ -24,8 +25,6 @@ function run_integration_tests()
             ds = NCDataset(netcdf_filepath)
             
             grid = initialize_curvilinear_grid(hydro_data.filepath)
-            
-            # Initialize state using the dataset dimensions
             state = initialize_state(grid, ds, (:C,))
 
             update_hydrodynamics!(state, grid, ds, hydro_data, 0.0)
@@ -35,13 +34,44 @@ function run_integration_tests()
             @test any(!iszero, state.v)
         end
 
+        @testset "Velocity Rotation with Real Data" begin
+            @info "Running Integration Test: Velocity Rotation..."
+            ds = NCDataset(netcdf_filepath)
+            
+            grid = initialize_curvilinear_grid(hydro_data.filepath)
+            state = initialize_state(grid, ds, ()) # No tracers needed
+
+            # Load the first time step of velocity data
+            update_hydrodynamics!(state, grid, ds, hydro_data, 0.0)
+            close(ds)
+
+            # Ensure we have velocities to work with
+            @test any(!iszero, state.u)
+            @test any(!iszero, state.v)
+
+            # Perform the rotation
+            u_east, v_north = rotate_velocities_to_geographic(grid, state.u, state.v)
+
+            # The output should also be populated
+            @test any(!iszero, u_east)
+            @test any(!iszero, v_north)
+
+            # Check that for a known non-zero angle, the rotation actually changed the vector.
+            # We pick a point in the middle of the domain.
+            i, j, k = 100, 150, 1
+            if grid.angle[i,j] != 0.0
+                u_rho_point = 0.5 * (state.u[i, j, k] + state.u[i+1, j, k])
+                @test u_east[i, j, k] != u_rho_point
+            end
+        end
+
         @testset "Mass Conservation with Point Source" begin
             @info "Running Integration Test: Mass Conservation..."
             ds = NCDataset(netcdf_filepath)
             
             grid_full = initialize_curvilinear_grid(hydro_data.filepath)
             
-            # Initialize a 2D state using the dataset dimensions
+            # Initialize a 2D state using the surface layer of the dataset dimensions
             grid_2d = CurvilinearGrid(
                 grid_full.nx, grid_full.ny, 1,
                 grid_full.lon_rho, grid_full.lat_rho, grid_full.lon_u, grid_full.lat_u,
@@ -69,12 +99,11 @@ function run_integration_tests()
             
             final_mass = sum(final_state.tracers[:TestTracer] .* grid_2d.volume)
             
-            # --- FIX: Revert to the original, simple calculation ---
-            # With the corrected TimeSteppingModule, the simulation runs for 10 steps (end_time / dt).
             expected_mass = source_rate * end_time
             
             @test isapprox(final_mass, expected_mass, rtol=0.01)
-            @test final_mass <= expected_mass * (1 + 1e-9)
+            # Check that the monotonic scheme isn't creating new mass
+            @test final_mass <= expected_mass * (1 + 1e-9) 
         end
     end
 end

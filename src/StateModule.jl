@@ -4,66 +4,75 @@ module StateModule
 
 export initialize_state
 
-using ..ModelStructs
+using ..HydrodynamicTransport.ModelStructs
 using NCDatasets
 
-# This is the internal helper for getting dimensions from our grid structs
-_get_dims(grid::CartesianGrid) = grid.dims
-_get_dims(grid::CurvilinearGrid) = (grid.nx, grid.ny, grid.nz)
+# This method for CartesianGrid is updated for consistency with the new architecture.
+function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} where N)
+    ng = grid.ng
+    nx, ny, nz = grid.dims
+    
+    # Total dimensions including ghost cells
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
 
-"""
-    initialize_state(grid::AbstractGrid, tracer_names)
-
-Creates a `State` object for placeholder/test runs.
-"""
-function initialize_state(grid::AbstractGrid, tracer_names::NTuple{N, Symbol} where N)
-    nx, ny, nz = _get_dims(grid)
     tracers = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
-        tracers[name] = zeros(Float64, nx, ny, nz)
+        tracers[name] = zeros(Float64, nx_tot, ny_tot, nz)
     end
-    u = zeros(Float64, nx + 1, ny, nz)
-    v = zeros(Float64, nx, ny + 1, nz)
-    w = zeros(Float64, nx, ny, nz + 1)
-    temperature = zeros(Float64, nx, ny, nz)
-    salinity = zeros(Float64, nx, ny, nz)
-    tss = zeros(Float64, nx, ny, nz)
-    uvb = zeros(Float64, nx, ny, nz)
-    return State(tracers, u, v, w, temperature, salinity, tss, uvb)
+    
+    u = zeros(Float64, nx_tot + 1, ny_tot, nz)
+    v = zeros(Float64, nx_tot, ny_tot + 1, nz)
+    w = zeros(Float64, nx_tot, ny_tot, nz + 1)
+    
+    temperature = zeros(Float64, nx_tot, ny_tot, nz)
+    salinity = zeros(Float64, nx_tot, ny_tot, nz)
+    tss = zeros(Float64, nx_tot, ny_tot, nz)
+    uvb = zeros(Float64, nx_tot, ny_tot, nz)
+
+    # Initialize time to 0.0
+    return State(tracers, u, v, w, temperature, salinity, tss, uvb, 0.0)
 end
 
-"""
-    initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names)
-
-Creates a `State` object with dimensions that perfectly match the NetCDF file `ds`.
-This is the robust method for real data runs.
-"""
+# --- Refactored State Initializer for Curvilinear Grids ---
 function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
-    # Get tracer dimensions from the grid struct
-    nx, ny, nz = grid.nx, grid.ny, grid.nz
-    
+    ng = grid.ng
+
+    # --- 1. Read Physical Dimensions from NetCDF file ---
+    nx_rho, ny_rho = ds.dim["xi_rho"], ds.dim["eta_rho"]
+    nx_u,   ny_u   = ds.dim["xi_u"],   ds.dim["eta_u"]
+    nx_v,   ny_v   = ds.dim["xi_v"],   ds.dim["eta_v"]
+    nz = ds.dim["s_rho"]
+    nz_w = ds.dim["s_w"]
+
+    # --- 2. Allocate State Arrays with Ghost Cells ---
+
+    # Rho-point arrays (tracers, salinity, etc.)
+    nx_rho_tot, ny_rho_tot = nx_rho + 2*ng, ny_rho + 2*ng
     tracers = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
-        tracers[name] = zeros(Float64, nx, ny, nz)
+        tracers[name] = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     end
+    temperature = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    # --- FIX: Get the EXACT staggered dimensions from the NetCDF file ---
-    u_dims = (ds.dim["xi_u"], ds.dim["eta_u"], ds.dim["s_rho"])
-    v_dims = (ds.dim["xi_v"], ds.dim["eta_v"], ds.dim["s_rho"])
-    w_dims = (ds.dim["xi_rho"], ds.dim["eta_rho"], ds.dim["s_w"])
+    # Staggered arrays (u, v, w)
+    # The array sizes must match the full grid arrays from GridModule, including ghost cells.
+    # Note: For a standard Arakawa-C grid, u would have ny_rho_tot and v would have nx_rho_tot.
+    # We follow the dimension names from the file for consistency with GridModule.
+    nx_u_tot, ny_u_tot = nx_u + 2*ng, ny_u + 2*ng
+    u = zeros(Float64, nx_u_tot, ny_u_tot, nz)
 
-    u = zeros(Float64, u_dims)
-    v = zeros(Float64, v_dims)
-    w = zeros(Float64, w_dims)
+    nx_v_tot, ny_v_tot = nx_v + 2*ng, ny_v + 2*ng
+    v = zeros(Float64, nx_v_tot, ny_v_tot, nz)
 
-    # Scalar fields use the tracer dimensions
-    temperature = zeros(Float64, nx, ny, nz)
-    salinity = zeros(Float64, nx, ny, nz)
-    tss = zeros(Float64, nx, ny, nz)
-    uvb = zeros(Float64, nx, ny, nz)
+    w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz_w)
 
-    return State(tracers, u, v, w, temperature, salinity, tss, uvb)
+    # --- 3. Construct and Return the State Struct ---
+    return State(tracers, u, v, w, temperature, salinity, tss, uvb, 0.0)
 end
 
 
 end # module StateModule
+

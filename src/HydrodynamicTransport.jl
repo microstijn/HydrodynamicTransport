@@ -2,10 +2,12 @@
 
 module HydrodynamicTransport
 
+# --- 1. Include all source files to define the modules ---
 include("ModelStructs.jl")
 include("GridModule.jl")
-include("VectorOperationsModule.jl")
 include("StateModule.jl")
+include("VectorOperationsModule.jl")
+include("BoundaryConditionsModule.jl")
 include("HorizontalTransportModule.jl")
 include("VerticalTransportModule.jl")
 include("SourceSinkModule.jl")
@@ -14,43 +16,39 @@ include("TimeSteppingModule.jl")
 include("TestCasesModule.jl")
 include("IntegrationTestsModule.jl")
 
-# Abstract and Concrete Grid type
+# --- 2. Bring the contents of the modules into the main module's scope ---
 using .ModelStructs
-export AbstractGrid
-export CartesianGrid
-export CurvilinearGrid
-export State
-export HydrodynamicData
-export PointSource
-
-# grid initializers and interpolators
 using .GridModule
-export initialize_cartesian_grid
-export initialize_curvilinear_grid
-export interpolate_center_to_xface!
-export interpolate_center_to_yface!
-
-using .VectorOperationsModule
-export rotate_velocities_to_geographic
-
 using .StateModule
-export initialize_state
-
-# Internal physics 
+using .VectorOperationsModule
+using .BoundaryConditionsModule
 using .HorizontalTransportModule
 using .VerticalTransportModule
 using .SourceSinkModule
 using .HydrodynamicsModule
-
-# TimeSteppingModule 
 using .TimeSteppingModule
+using .TestCasesModule
+using .IntegrationTestsModule
+
+# --- 3. Export the public API ---
+# Types from ModelStructs.jl
+export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary
+       
+# Functions from GridModule.jl
+export initialize_cartesian_grid, initialize_curvilinear_grid
+
+# Functions from StateModule.jl
+export initialize_state
+
+# Functions from VectorOperationsModule.jl
+export rotate_velocities_to_geographic
+
+# Functions from TimeSteppingModule.jl
 export run_simulation, run_and_store_simulation
 
-# The test suite 
-using .TestCasesModule
-export run_all_tests
+# Functions from TestCasesModule.jl and IntegrationTestsModule.jl
+export run_all_tests, run_integration_tests
 
-using .IntegrationTestsModule
-export run_integration_tests
 
 end # module HydrodynamicTransport

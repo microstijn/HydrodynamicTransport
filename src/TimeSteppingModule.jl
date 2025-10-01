@@ -9,32 +9,24 @@ using ..HydrodynamicsModule
 using ..HorizontalTransportModule
 using ..VerticalTransportModule
 using ..SourceSinkModule
+using ..BoundaryConditionsModule # Import the new module
 using ProgressMeter
 using NCDatasets
 
-# --- Test/Placeholder Versions ---
-function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64)
-    state = deepcopy(initial_state)
-    time_range = start_time:dt:end_time
-    @showprogress "Simulating (Test Mode)..." for time in time_range
-        # Skip the update at the initial time step (t=0)
-        if time == start_time; continue; end
-        
-        update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt)
-        vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
-    end
-    return state
-end
-
-function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64)
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
     last_output_time = start_time
-    @showprogress "Simulating & Storing (Test Mode)..." for time in time_range
+    
+    @showprogress "Simulating & Storing..." for time in time_range
         if time == start_time; continue; end
+        
+        # Update the state's internal time
+        state = State(state.tracers, state.u, state.v, state.w, state.temperature, state.salinity, state.tss, state.uvb, time)
+        
+        # --- NEW: Apply boundary conditions by filling ghost cells ---
+        apply_boundary_conditions!(state, grid, boundary_conditions)
 
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt)
@@ -50,15 +42,17 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
     return results, timesteps
 end
 
-# --- Real Data Versions ---
-function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64)
+# The run_simulation function would be updated similarly
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
-    @showprogress "Simulating (Real Data)..." for time in time_range
-        # Skip the update at the initial time step (t=0)
+    
+    @showprogress "Simulating..." for time in time_range
         if time == start_time; continue; end
-
-        update_hydrodynamics!(state, grid, ds, hydro_data, time)
+        state = State(state.tracers, state.u, state.v, state.w, state.temperature, state.salinity, state.tss, state.uvb, time)
+        
+        apply_boundary_conditions!(state, grid, boundary_conditions)
+        update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
@@ -66,26 +60,5 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64)
-    state = deepcopy(initial_state)
-    time_range = start_time:dt:end_time
-    results = [deepcopy(state)]; timesteps = [start_time]
-    last_output_time = start_time
-    @showprogress "Simulating & Storing (Real Data)..." for time in time_range
-        if time == start_time; continue; end
-        
-        update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt)
-        vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
-
-        if time >= last_output_time + output_interval - 1e-9
-            push!(results, deepcopy(state))
-            push!(timesteps, time)
-            last_output_time = time
-        end
-    end
-    return results, timesteps
-end
 
 end # module TimeSteppingModule

@@ -8,70 +8,46 @@ using UnicodePlots
 using NCDatasets
 
 
-run_all_tests();
 
-run_integration_tests()
 
-nx, ny, nz = 80, 80, 1
-Lx, Ly = 100.0, 100.0
-center_x, center_y = Lx / 2, Ly / 2
+#TODO
+#=
+Step 5: Refactor Helper Functions in HorizontalTransportModule.jl
+Goal: Ensure that calculations of cell size (dx, dy) are correct for cells near the boundary.
 
-lon_rho = zeros(Float64, nx, ny); lat_rho = zeros(Float64, nx, ny); angle = zeros(Float64, nx, ny)
-for j in 1:ny, i in 1:nx
-    x = (i - 0.5) * Lx / nx; y = (j - 0.5) * Ly / ny
-    dist_from_center = sqrt((x - center_x)^2 + (y - center_y)^2)
-    swirl_angle = π / 4 * (dist_from_center / (Lx / 2))
-    
-    rotated_x = center_x + (x - center_x) * cos(swirl_angle) - (y - center_y) * sin(swirl_angle)
-    rotated_y = center_y + (x - center_x) * sin(swirl_angle) + (y - center_y) * cos(swirl_angle)
-    
-    lon_rho[i, j] = rotated_x; lat_rho[i, j] = rotated_y; angle[i, j] = swirl_angle
-end
+Analysis: I have identified a critical bug. Functions like get_dx_at_face currently take i_phys and j_phys as arguments and use them to index into the pm and pn arrays. This is incorrect. The pm and pn arrays now have ghost cells and must be indexed with the full global indices (i_glob, j_glob) to correctly access the extrapolated metric values in the ghost region.
 
-pm = fill(nx / Lx, (nx, ny)); pn = fill(ny / Ly, (nx, ny)); z_w = [-1.0, 0.0]
-h = fill(1.0, (nx, ny)); mask = trues(nx, ny)
-face_area_x = fill((Ly / ny) * 1.0, (nx + 1, ny, nz))
-face_area_y = fill((Lx / nx) * 1.0, (nx, ny + 1, nz))
-volume = fill((Lx / nx) * (Ly / ny) * 1.0, (nx, ny, nz))
+Proposed Change: I will change the signature of all grid-spacing helper functions (e.g., get_dx_at_face, get_dy_centers) to accept the global indices (i_glob, j_glob) instead of the physical ones. The main advection/diffusion loops will be updated to pass these correct indices. This is a crucial fix for stability.
 
-grid = CurvilinearGrid(nx, ny, nz, lon_rho, lat_rho, lon_rho, lat_rho, lon_rho, lat_rho, z_w, 
-                       pm, pn, angle, h, mask, mask, mask, face_area_x, face_area_y, volume)
-println("Curvilinear grid generated successfully.")
+Step 6: Implement VerticalTransportModule.jl for Curvilinear Grids
+Goal: Add the necessary methods to perform vertical transport on a curvilinear grid.
 
-# --- 3. Initialize State (Velocities start at zero) ---
-state = initialize_state(grid, (:Tracer,))
-C = state.tracers[:Tracer]
+Analysis: This module currently only has methods for CartesianGrid. We need to add new methods that can be dispatched for a CurvilinearGrid.
 
-# --- 4. Set Initial Condition for the Tracer ---
-cone_radius = 15.0
-cone_center_x = 50.0
-cone_center_y = 75.0
+Proposed Change:
 
-for j in 1:ny, i in 1:nx
-    dist = sqrt((lon_rho[i,j] - cone_center_x)^2 + (lat_rho[i,j] - cone_center_y)^2)
-    C[i,j,1] = max(0.0, 100.0 * (1.0 - dist / cone_radius))
-end
+I will add a new method for solve_implicit_diffusion_column! that is specialized for CurvilinearGrid. It will correctly calculate dz from the grid.z_w vector and the vertical face area from 1 / (pm * pn).
 
-println("\nInitial State:")
-println(heatmap(C[:,:,1]', title="Tracer at Time = 0.0", colormap=:viridis, width=60))
-mass_initial = sum(C .* grid.volume)
-println("Initial Mass: ", mass_initial)
-println("Initial Max Concentration: ", maximum(C))
+I will update the main vertical_transport! function to correctly handle the CurvilinearGrid case, using its new helper.
 
-# --- 5. Run the Simulation ---
-# The runner will now call our new placeholder function at each step to generate the vortex.
-dt = 0.1
-period = 200.0
-start_time = 0.0
-end_time = period
-sources = Vector{PointSource}() 
+Step 7: Create a New Integration Test
+Goal: Add a final test to IntegrationTestsModule.jl that runs a short, end-to-end simulation on the curvilinear grid to prove that all the components work together.
 
-results, timesteps = run_and_store_simulation(grid, state, sources, start_time, end_time, dt, period / 10)
-println("\nSimulation complete.")
+Analysis: A simple test that confirms stability and mass conservation is the best way to validate the entire refactoring effort.
 
-# --- 6. Display Results --
+Proposed Change: I will add a new @testset "Curvilinear Simulation" that:
 
-for p in results
-    C = p.tracers[:Tracer]
-    println(heatmap(C[:,:,1]', colormap=:viridis, width=60))
-end
+Initializes the grid and state from the ROMS file.
+
+Sets all boundary velocities to zero to enforce a no-flux, closed-domain condition.
+
+Initializes a simple tracer patch in the middle of the domain.
+
+Runs the simulation for a few hundred steps.
+
+Asserts that the total tracer mass is conserved and that no NaN values are produced.
+
+This plan systematically addresses all the remaining pieces of the refactoring. Once this is complete, the model will be fully capable of running stable, conservative simulations on real-world curvilinear grids.
+=#
+
+

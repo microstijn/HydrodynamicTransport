@@ -33,7 +33,7 @@ function rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::Abstract
     v_north = zeros(Float64, nx, ny, size(u_stag, 3))
 
     # 1. Interpolate staggered velocities to cell centers (rho-points)
-    for k in 1:size(u_stag, 3) # Loop over vertical layers
+    for k in 1:axes(u_stag, 3) # Loop over vertical layers
         for j in 1:ny, i in 1:nx
             u_rho[i, j, k] = 0.5 * (u_stag[i, j, k] + u_stag[i+1, j, k])
             v_rho[i, j, k] = 0.5 * (v_stag[i, j, k] + v_stag[i, j+1, k])
@@ -41,7 +41,7 @@ function rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::Abstract
     end
 
     # 2. Apply the rotation at each cell center
-    for k in 1:size(u_stag, 3)
+    for k in 1:axes(u_stag, 3)
         for j in 1:ny, i in 1:nx
             ur = u_rho[i, j, k]
             vr = v_rho[i, j, k]

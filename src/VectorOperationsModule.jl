@@ -1,59 +1,86 @@
-# src/VectorOperations.jl
+# src/VectorOperationsModule.jl
 
 module VectorOperationsModule
 
-export rotate_velocities_to_geographic
+export rotate_velocities_to_geographic, rotate_velocities_to_grid! # Note the "!"
 
-using ..ModelStructs
+using ..HydrodynamicTransport.ModelStructs
 
 """
     rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
-
-Rotates grid-aligned velocities (u, v) to geographic velocities (East, North).
-
-This function follows the standard procedure for curvilinear models:
-1. Interpolate the staggered u and v components to the cell centers (rho-points).
-2. Apply the 2D rotation matrix using the `angle` metric at each rho-point.
-
-# Arguments
-- `grid`: A `CurvilinearGrid` containing the `angle` metric.
-- `u_stag`: The 2D or 3D array of grid-aligned u-velocity on the u-faces.
-- `v_stag`: The 2D or 3D array of grid-aligned v-velocity on the v-faces.
-
-# Returns
-- `u_east`, `v_north`: Tuple of 2D or 3D arrays containing the geographic velocity components at the cell centers.
+... (this function is unchanged) ...
 """
 function rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
-    nx, ny, _ = size(grid.volume) # Use volume to get tracer dimensions
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    u_east = zeros(Float64, nx, ny, nz); v_north = zeros(Float64, nx, ny, nz)
+    u_rho = zeros(Float64, nx, ny, nz); v_rho = zeros(Float64, nx, ny, nz)
 
-    # Create new arrays for the centered and rotated velocities
-    u_rho = zeros(Float64, nx, ny, size(u_stag, 3))
-    v_rho = zeros(Float64, nx, ny, size(v_stag, 3))
-    u_east = zeros(Float64, nx, ny, size(u_stag, 3))
-    v_north = zeros(Float64, nx, ny, size(u_stag, 3))
-
-    # 1. Interpolate staggered velocities to cell centers (rho-points)
-    for k in 1:axes(u_stag, 3) # Loop over vertical layers
-        for j in 1:ny, i in 1:nx
-            u_rho[i, j, k] = 0.5 * (u_stag[i, j, k] + u_stag[i+1, j, k])
-            v_rho[i, j, k] = 0.5 * (v_stag[i, j, k] + v_stag[i, j+1, k])
-        end
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        u_rho[i_phys, j_phys, k] = 0.5 * (u_stag[i_glob, j_glob, k] + u_stag[i_glob+1, j_glob, k])
+        v_rho[i_phys, j_phys, k] = 0.5 * (v_stag[i_glob, j_glob, k] + v_stag[i_glob, j_glob+1, k])
     end
 
-    # 2. Apply the rotation at each cell center
-    for k in 1:axes(u_stag, 3)
-        for j in 1:ny, i in 1:nx
-            ur = u_rho[i, j, k]
-            vr = v_rho[i, j, k]
-            ang = grid.angle[i, j]
-            
-            # Apply rotation formulas
-            u_east[i, j, k] = ur * cos(ang) - vr * sin(ang)
-            v_north[i, j, k] = vr * cos(ang) + ur * sin(ang)
-        end
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        ur = u_rho[i_phys, j_phys, k]; vr = v_rho[i_phys, j_phys, k]
+        ang = grid.angle[i_glob, j_glob]
+        u_east[i_phys, j_phys, k] = ur * cos(ang) - vr * sin(ang)
+        v_north[i_phys, j_phys, k] = vr * cos(ang) + ur * sin(ang)
     end
-
     return u_east, v_north
 end
+
+
+"""
+    rotate_velocities_to_grid!(u_stag, v_stag, grid, u_east, v_north)
+
+Rotates geographic velocities (East, North) at cell centers to grid-aligned velocities (u, v) 
+and fills them IN-PLACE into the pre-allocated u_stag and v_stag arrays.
+"""
+function rotate_velocities_to_grid!(u_stag::AbstractArray, v_stag::AbstractArray, grid::CurvilinearGrid, u_east::AbstractArray, v_north::AbstractArray)
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
+    u_rho = zeros(Float64, nx, ny, nz)
+    v_rho = zeros(Float64, nx, ny, nz)
+
+    # 1. Apply the inverse rotation at each physical cell center
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        ue = u_east[i_phys, j_phys, k]; vn = v_north[i_phys, j_phys, k]
+        ang = grid.angle[i_glob, j_glob]
+        u_rho[i_phys, j_phys, k] = ue * cos(-ang) - vn * sin(-ang)
+        v_rho[i_phys, j_phys, k] = vn * cos(-ang) + ue * sin(-ang)
+    end
+
+    # 2. Interpolate from rho-points to staggered faces (physical domain only)
+    # This now writes directly into the provided u_stag and v_stag arrays
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx+1
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        if i_phys == 1
+            u_stag[i_glob, j_glob, k] = u_rho[i_phys, j_phys, k]
+        elseif i_phys == nx + 1
+            u_stag[i_glob, j_glob, k] = u_rho[i_phys-1, j_phys, k]
+        else
+            u_stag[i_glob, j_glob, k] = 0.5 * (u_rho[i_phys-1, j_phys, k] + u_rho[i_phys, j_phys, k])
+        end
+    end
+    
+    for k in 1:nz, j_phys in 1:ny+1, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        if j_phys == 1
+            v_stag[i_glob, j_glob, k] = v_rho[i_phys, j_phys, k]
+        elseif j_phys == ny + 1
+            v_stag[i_glob, j_glob, k] = v_rho[i_phys, j_phys-1, k]
+        else
+            v_stag[i_glob, j_glob, k] = 0.5 * (v_rho[i_phys, j_phys-1, k] + v_rho[i_phys, j_phys, k])
+        end
+    end
+    
+    return nothing # The function modifies u_stag and v_stag in-place
+end
+
 
 end # module VectorOperationsModule

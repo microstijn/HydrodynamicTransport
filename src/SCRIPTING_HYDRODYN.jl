@@ -50,4 +50,6 @@ Asserts that the total tracer mass is conserved and that no NaN values are produ
 This plan systematically addresses all the remaining pieces of the refactoring. Once this is complete, the model will be fully capable of running stable, conservative simulations on real-world curvilinear grids.
 =#
 
+# write tests to test the overall working of curvi and regular grids again
+# then  to speed up the process. its too slow right now. 
 

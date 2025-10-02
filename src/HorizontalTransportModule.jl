@@ -7,7 +7,7 @@ export horizontal_transport!
 using ..HydrodynamicTransport.ModelStructs
 using StaticArrays
 
-# --- Stencil Functions (unchanged) ---
+# --- Stencil Functions -
 function get_stencil_x(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
     return C[i_glob-2, j_glob, k], C[i_glob-1, j_glob, k], C[i_glob, j_glob, k], C[i_glob+1, j_glob, k], C[i_glob+2, j_glob, k]
 end
@@ -16,7 +16,7 @@ function get_stencil_y(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
     return C[i_glob, j_glob-2, k], C[i_glob, j_glob-1, k], C[i_glob, j_glob, k], C[i_glob, j_glob+1, k], C[i_glob, j_glob+2, k]
 end
 
-# --- Helper functions for Bott Scheme (unchanged) ---
+# --- Helper functions for Bott Scheme 
 function calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
     a1 = (c_ip1 - c_im1) / 2.0
     a3 = (c_ip2 - 2*c_ip1 + 2*c_im1 - c_im2) / 12.0 - (2/3.0) * a1

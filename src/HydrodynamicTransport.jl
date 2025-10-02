@@ -15,6 +15,8 @@ include("Hydrodynamics.jl")
 include("TimeSteppingModule.jl")
 include("TestCasesModule.jl")
 include("IntegrationTestsModule.jl")
+include("UtilsModule.jl")
+
 
 # --- 2. Bring the contents of the modules into the main module's scope ---
 using .ModelStructs
@@ -29,6 +31,7 @@ using .HydrodynamicsModule
 using .TimeSteppingModule
 using .TestCasesModule
 using .IntegrationTestsModule
+using .UtilsModule
 
 # --- 3. Export the public API ---
 # Types from ModelStructs.jl
@@ -50,5 +53,7 @@ export run_simulation, run_and_store_simulation
 # Functions from TestCasesModule.jl and IntegrationTestsModule.jl
 export run_all_tests, run_integration_tests
 
+# estimate stable timesteps based on netCDF files
+export estimate_stable_timestep
 
 end # module HydrodynamicTransport

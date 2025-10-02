@@ -33,17 +33,14 @@ end
 function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Kh = 1.0 
     for tracer_name in keys(state.tracers)
-        C_current = state.tracers[tracer_name]
-        C_in = C_current # C_in has ghost cells filled
+        C1 = state.tracers[tracer_name]
+        C2 = state._buffers[tracer_name] 
         
-        C_temp = deepcopy(C_current)
-        advect_x!(C_temp, C_in, state.u, grid, dt)
-        advect_y!(C_current, C_temp, state.v, grid, dt)
+        advect_x!(C2, C1, state.u, grid, dt)
+        advect_y!(C1, C2, state.v, grid, dt)
         
-        copyto!(C_in, C_current)
-        diffuse_x!(C_temp, C_in, grid, dt, Kh)
-        copyto!(C_in, C_temp)
-        diffuse_y!(C_current, C_in, grid, dt, Kh)
+        diffuse_x!(C2, C1, grid, dt, Kh)
+        diffuse_y!(C1, C2, grid, dt, Kh)
     end
     return nothing
 end
@@ -64,7 +61,7 @@ function advect_x!(C_out, C_in, u, grid::AbstractGrid, dt)
         donor_idx, receiver_idx = velocity >= 0 ? (i_glob - 1, i_glob) : (i_glob, i_glob - 1)
         
         c_stencil = get_stencil_x(C_in, donor_idx, j_glob, k)
-        dx_donor = get_dx_at_face(grid, i_glob, j_glob) # Pass global indices
+        dx_donor = get_dx_at_face(grid, i_glob, j_glob)
         
         a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
         courant_abs = abs(velocity * dt / dx_donor); if courant_abs > 1.0; courant_abs = 1.0; end
@@ -111,7 +108,7 @@ function advect_y!(C_out, C_in, v, grid::AbstractGrid, dt)
         velocity = v[i_glob, j_glob, k]; if abs(velocity) < 1e-12; continue; end
         donor_idx, receiver_idx = velocity >= 0 ? (j_glob - 1, j_glob) : (j_glob, j_glob - 1)
         c_stencil = get_stencil_y(C_in, i_glob, donor_idx, k)
-        dy_donor = get_dy_at_face(grid, i_glob, j_glob) # Pass global indices
+        dy_donor = get_dy_at_face(grid, i_glob, j_glob)
         
         a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
         courant_abs = abs(velocity * dt / dy_donor); if courant_abs > 1.0; courant_abs = 1.0; end
@@ -152,10 +149,19 @@ function diffuse_x!(C_out, C_in, grid, dt, Kh)
     
     for k in axes(C_in, 3), j_phys in 1:ny, i_phys in 1:nx+1
         i_glob, j_glob = i_phys + ng, j_phys + ng
-        if i_phys > 1 # Can only calculate centered difference for interior faces
+        if i_phys > 1
             dx = get_dx_centers(grid, i_glob, j_glob)
             dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
-            fluxes_x[i_glob, j_glob, k] = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+            flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+            
+            # --- FIX: Enforce no-flux condition at land boundaries ---
+            face_is_wet = if isa(grid, CurvilinearGrid)
+                grid.mask_u[i_glob, j_glob]
+            else # CartesianGrid
+                grid.mask[i_glob, j_glob, k] && grid.mask[i_glob-1, j_glob, k]
+            end
+            
+            fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
         end
     end
 
@@ -176,7 +182,16 @@ function diffuse_y!(C_out, C_in, grid, dt, Kh)
         if j_phys > 1
             dy = get_dy_centers(grid, i_glob, j_glob)
             dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
-            fluxes_y[i_glob, j_glob, k] = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+            flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+
+            # --- FIX: Enforce no-flux condition at land boundaries ---
+            face_is_wet = if isa(grid, CurvilinearGrid)
+                grid.mask_v[i_glob, j_glob]
+            else # CartesianGrid
+                grid.mask[i_glob, j_glob, k] && grid.mask[i_glob, j_glob-1, k]
+            end
+
+            fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
         end
     end
 

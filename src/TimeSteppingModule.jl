@@ -14,6 +14,7 @@ using ProgressMeter
 using NCDatasets
 
 # --- Test/Placeholder Versions ---
+# This version is for running without real hydrodynamic data files.
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
@@ -54,8 +55,10 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
     return results, timesteps
 end
 
-# --- NEW: Real Data Versions with Boundary Conditions ---
-function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(), ds::NCDataset, hydro_data::HydrodynamicData)
+# --- Real Data Versions with Boundary Conditions ---
+# This version is for running WITH real hydrodynamic data.
+# ds and hydro_data are now POSITIONAL arguments to make the method unique.
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     @showprogress "Simulating (Real Data)..." for time in time_range
@@ -71,7 +74,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(), ds::NCDataset, hydro_data::HydrodynamicData)
+# ds and hydro_data are now POSITIONAL arguments to make the method unique.
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]

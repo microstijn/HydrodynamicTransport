@@ -73,17 +73,16 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     if nz <= 1; return; end
 
     for tracer_name in keys(state.tracers)
-        C = state.tracers[tracer_name]
-        C_in = deepcopy(C)
-        C_after_advection = similar(C)
+        C_final = state.tracers[tracer_name]
+        C_buffer = state._buffers[tracer_name] # Get the pre-allocated buffer
 
         # --- 1. Advection Step (Grid-wide) ---
-        # Loop over physical domain, using global indices for array access
+        # The logic here reads from C_final and stores the advected result in C_buffer
         for j_phys in 1:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_in[i_glob, j_glob, :]
-            C_col_out = view(C_after_advection, i_glob, j_glob, :)
+            C_col_in = C_final[i_glob, j_glob, :] # Read from original data
+            C_col_out = view(C_buffer, i_glob, j_glob, :) # Write advected result to buffer
             
             flux_z = zeros(nz + 1)
             for k in 2:nz
@@ -111,12 +110,13 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
         end
 
         # --- 2. Diffusion Step (Grid-wide, using the correct helper) ---
-        # Loop over physical domain, using global indices for array access
+        # The logic now reads from the buffer (C_buffer) and writes the final result back to C_final.
         for j_phys in 1:ny, i_phys in 1:nx
+            # --- FIX: Correctly calculate j_glob from j_phys ---
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_after_advection[i_glob, j_glob, :]
-            C_col_out = view(C, i_glob, j_glob, :)
+            C_col_in = C_buffer[i_glob, j_glob, :] # Read from buffer
+            C_col_out = view(C_final, i_glob, j_glob, :) # Write final result to tracer array
             
             # This will now dispatch to the correct method based on grid type
             solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)

@@ -7,7 +7,7 @@ export initialize_state
 using ..HydrodynamicTransport.ModelStructs 
 using NCDatasets
 
-# This method for CartesianGrid is unchanged
+# This method for CartesianGrid is now updated
 function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} where N)
     ng = grid.ng
     nx, ny, nz = grid.dims
@@ -15,8 +15,12 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
 
     tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}() # Create the buffers dictionary
     for name in tracer_names
-        tracers[name] = zeros(Float64, nx_tot, ny_tot, nz)
+        tracer_arr = zeros(Float64, nx_tot, ny_tot, nz)
+        tracers[name] = tracer_arr
+        # --- FIX: Replace similar() with zeros() for predictable initialization ---
+        buffers[name] = zeros(size(tracer_arr))
     end
     
     u = zeros(Float64, nx_tot + 1, ny_tot, nz)
@@ -28,10 +32,10 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     tss = zeros(Float64, nx_tot, ny_tot, nz)
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
 
-    return State(tracers, u, v, w, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, temperature, salinity, tss, uvb, 0.0)
 end
 
-# --- FIX: This method now correctly calculates all staggered dimensions from first principles ---
+# This method for CurvilinearGrid is now updated
 function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N)
     ng = grid.ng
     nx, ny, nz = grid.nx, grid.ny, grid.nz
@@ -41,14 +45,16 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
 
     tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}() # Create the buffers dictionary
     for name in tracer_names
-        tracers[name] = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracers[name] = tracer_arr
+        # --- FIX: Replace similar() with zeros() for predictable initialization ---
+        buffers[name] = zeros(size(tracer_arr))
     end
     
     # Correctly allocate state arrays with staggered sizes
-    # u lives on faces, so there is one more face than cells in the x-direction
     u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
-    # v lives on faces, so there is one more face than cells in the y-direction
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz_w)
     
@@ -57,11 +63,11 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, u, v, w, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, temperature, salinity, tss, uvb, 0.0)
 end
 
 
-# This method for reading from a NetCDF file is also updated for consistency
+# This method for reading from a NetCDF file is now updated
 function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
     ng = grid.ng
 
@@ -71,8 +77,12 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
 
     nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
     tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}() # Create the buffers dictionary
     for name in tracer_names
-        tracers[name] = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracers[name] = tracer_arr
+        # --- FIX: Replace similar() with zeros() for predictable initialization ---
+        buffers[name] = zeros(size(tracer_arr))
     end
     temperature = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
@@ -83,7 +93,7 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz_w)
 
-    return State(tracers, u, v, w, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, temperature, salinity, tss, uvb, 0.0)
 end
 
 

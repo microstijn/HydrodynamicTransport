@@ -36,6 +36,7 @@ end
 
 mutable struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
+    _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary calculations
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
@@ -75,4 +76,3 @@ struct HydrodynamicData
 end
 
 end # module ModelStructs
-

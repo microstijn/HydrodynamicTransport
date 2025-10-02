@@ -5,3 +5,4 @@ src/phase2_boundaries.jl
 src/curvi_phase2_difussion.jl
 src/curvi_phase2_advection_test.jl
 .gitignore
+.repomix/bundles.json

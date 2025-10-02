@@ -47,7 +47,8 @@ function apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vecto
             inflow_values = bc.inflow_concentrations(state.time)
             boundary_velocity = state.u[nx+ng+1, j_glob, k]
             if boundary_velocity < 0 # Inflow
-                for (name, arr) in state.tracers; arr[nx+ng+1:nx_tot, j_glob, k] .= get(inflow_values, name, arr[nx+ng, j_glob, k]); end
+                # --- FIX: Use a safe default of 0.0 for unspecified tracers during inflow ---
+                for (name, arr) in state.tracers; arr[nx+ng+1:nx_tot, j_glob, k] .= get(inflow_values, name, 0.0); end
             else # Outflow
                 for tracer in values(state.tracers); tracer[nx+ng+1:nx_tot, j_glob, k] .= tracer[nx+ng, j_glob, k]; end
             end
@@ -92,4 +93,3 @@ function apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vecto
 end
 
 end # module BoundaryConditionsModule
-

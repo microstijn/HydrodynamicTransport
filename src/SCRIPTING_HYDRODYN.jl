@@ -53,3 +53,53 @@ This plan systematically addresses all the remaining pieces of the refactoring. 
 # write tests to test the overall working of curvi and regular grids again
 # then  to speed up the process. its too slow right now. 
 
+
+@info "Setting up Real Data simulation..."
+# OPeNDAP URL and variable map
+norway_netcdf_filepath = "https://ns9081k.hyrax.sigma2.no/opendap/K160_bgc/Sim2/ocean_his_0001.nc"
+norway_variable_map = Dict(
+	:u => "u",
+	:v => "v",
+	:temp => "temp",
+	:salt => "salt",
+	:time => "ocean_time"
+)
+norway_hydro_data = HydrodynamicData(norway_netcdf_filepath, norway_variable_map)
+# Simulation time and sources
+norway_start_time = 0.0
+norway_end_time = 2 * 3600.0
+norway_dt = 120.0 * 12
+norway_output_interval = 60*60*5.0
+norway_source_config = [
+	PointSource(i=100, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=200, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=300, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+    PointSource(i=10, j=20, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=80, j=90, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	#PointSource(i=500, j=100, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7)
+]
+# Connect to the remote dataset
+@info "Connecting to remote NetCDF file via OPeNDAP..."
+ds = NCDataset(norway_netcdf_filepath)
+@info "Connection successful."
+# --- UPDATED: Initialize grid and state correctly for curvilinear data ---
+@info "Initializing Curvilinear Grid from NetCDF..."
+norway_grid = initialize_curvilinear_grid(norway_hydro_data.filepath)
+
+@info "Initializing State with NetCDF dimensions..."
+norway_initial_state = initialize_state(norway_grid, ds, (:C_virus,))
+# Run the simulation
+@info "Starting simulation on real data..."
+norway_f_state = run_simulation(
+    norway_grid,
+    norway_initial_state,
+    norway_source_config,
+    ds,
+    norway_hydro_data,
+    norway_start_time,
+    norway_end_time,
+    norway_dt
+)
+
+close(ds)
+@info "Real data simulation finished."

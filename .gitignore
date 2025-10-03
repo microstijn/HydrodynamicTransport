@@ -6,3 +6,6 @@ src/curvi_phase2_difussion.jl
 src/curvi_phase2_advection_test.jl
 .gitignore
 .repomix/bundles.json
+src/speed_comparison_TVD_UP3.jl
+src/scheme_comparison_test.jl
+src/test_hydrodynamics_interpolation.jl

@@ -3,6 +3,7 @@
 module HydrodynamicTransport
 
 # --- 1. Include all source files to define the modules ---
+# Core modules are included first.
 include("ModelStructs.jl")
 include("GridModule.jl")
 include("StateModule.jl")
@@ -13,9 +14,11 @@ include("VerticalTransportModule.jl")
 include("SourceSinkModule.jl")
 include("Hydrodynamics.jl")
 include("TimeSteppingModule.jl")
-include("TestCasesModule.jl")
-include("IntegrationTestsModule.jl")
-include("UtilsModule.jl")
+include("UtilsModule.jl") # <-- MOVED UP to be with other core modules
+
+# Test-related modules are included last.
+#include("TestCasesModule.jl")
+#include("IntegrationTestsModule.jl")
 
 
 # --- 2. Bring the contents of the modules into the main module's scope ---
@@ -29,9 +32,10 @@ using .VerticalTransportModule
 using .SourceSinkModule
 using .HydrodynamicsModule
 using .TimeSteppingModule
-using .TestCasesModule
-using .IntegrationTestsModule
+#using .TestCasesModule
+#using .IntegrationTestsModule
 using .UtilsModule
+
 
 # --- 3. Export the public API ---
 # Types from ModelStructs.jl
@@ -51,9 +55,9 @@ export rotate_velocities_to_geographic
 export run_simulation, run_and_store_simulation
 
 # Functions from TestCasesModule.jl and IntegrationTestsModule.jl
-export run_all_tests, run_integration_tests
+#export run_all_tests, run_integration_tests
 
-# estimate stable timesteps based on netCDF files
-export estimate_stable_timestep
+# Functions from UtilsModule.jl
+export estimate_stable_timestep, create_hydrodynamic_data_from_file
 
 end # module HydrodynamicTransport

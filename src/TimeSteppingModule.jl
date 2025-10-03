@@ -14,8 +14,9 @@ using ProgressMeter
 using NCDatasets
 
 # --- Test/Placeholder Versions ---
-# This version is for running without real hydrodynamic data files.
-function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
+                        boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     @showprogress "Simulating (Test Mode)..." for time in time_range
@@ -24,14 +25,16 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt)
+        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
     end
     return state
 end
 
-function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
+                                  boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -42,7 +45,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt)
+        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
         
@@ -55,10 +58,10 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
     return results, timesteps
 end
 
-# --- Real Data Versions with Boundary Conditions ---
-# This version is for running WITH real hydrodynamic data.
-# ds and hydro_data are now POSITIONAL arguments to make the method unique.
-function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
+# --- Real Data Versions ---
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
+                        boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     @showprogress "Simulating (Real Data)..." for time in time_range
@@ -67,15 +70,16 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt)
+        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
     end
     return state
 end
 
-# ds and hydro_data are now POSITIONAL arguments to make the method unique.
-function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}())
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
+                                  boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -86,7 +90,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt)
+        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
 

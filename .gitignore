@@ -9,3 +9,7 @@ src/curvi_phase2_advection_test.jl
 src/speed_comparison_TVD_UP3.jl
 src/scheme_comparison_test.jl
 src/test_hydrodynamics_interpolation.jl
+test/test_integration_NEW.jl
+test/test_utils.jl
+.gitignore
+test/runtests.jl

@@ -12,29 +12,61 @@ using ..HydrodynamicTransport.SourceSinkModule
 using ..HydrodynamicTransport.BoundaryConditionsModule
 using ProgressMeter
 using NCDatasets
+using JLD2 # Added for saving state objects
 
 # --- Test/Placeholder Versions ---
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
-                        advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
-    state = deepcopy(initial_state)
-    time_range = start_time:dt:end_time
-    @showprogress "Simulating (Test Mode)..." for time in time_range
-        if time == start_time; continue; end
+                        advection_scheme::Symbol=:TVD,
+                        output_dir::Union{String, Nothing}=nothing,
+                        output_interval::Union{Float64, Nothing}=nothing,
+                        restart_from::Union{String, Nothing}=nothing) # <-- NEW ARGUMENT
+    
+    # --- Logic to handle starting a new simulation vs. restarting ---
+    local state_to_run, effective_start_time
+    if restart_from !== nothing
+        println("--- Restarting simulation from checkpoint: $restart_from ---")
+        loaded_state = JLD2.load_object(restart_from)
+        state_to_run = loaded_state
+        effective_start_time = loaded_state.time
+    else
+        state_to_run = initial_state
+        effective_start_time = start_time
+    end
+
+    state = deepcopy(state_to_run)
+    time_range = effective_start_time:dt:end_time
+    
+    # --- Setup for file-based output ---
+    next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
+    if output_dir !== nothing
+        mkpath(output_dir)
+    end
+    
+    @showprogress "Simulating (Test Mode)..." for (step, time) in enumerate(time_range)
+        if time == effective_start_time; continue; end
         state.time = time
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
+        horizontal_transport!(state, grid, dt, advection_scheme)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
+
+        # --- Save state to disk if configured ---
+        if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
+            output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
+            JLD2.save_object(output_filename, state)
+            next_output_time += output_interval
+        end
     end
     return state
 end
 
+# This function remains for in-memory storage, useful for small tests
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
-                                  advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
+                                  advection_scheme::Symbol=:TVD)
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -45,7 +77,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
+        horizontal_transport!(state, grid, dt, advection_scheme)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
         
@@ -61,25 +93,56 @@ end
 # --- Real Data Versions ---
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
-                        advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
-    state = deepcopy(initial_state)
-    time_range = start_time:dt:end_time
-    @showprogress "Simulating (Real Data)..." for time in time_range
-        if time == start_time; continue; end
+                        advection_scheme::Symbol=:TVD,
+                        output_dir::Union{String, Nothing}=nothing,
+                        output_interval::Union{Float64, Nothing}=nothing,
+                        restart_from::Union{String, Nothing}=nothing) # <-- NEW ARGUMENT
+    
+    # --- Logic to handle starting a new simulation vs. restarting ---
+    local state_to_run, effective_start_time
+    if restart_from !== nothing
+        println("--- Restarting simulation from checkpoint: $restart_from ---")
+        loaded_state = JLD2.load_object(restart_from)
+        state_to_run = loaded_state
+        effective_start_time = loaded_state.time
+    else
+        state_to_run = initial_state
+        effective_start_time = start_time
+    end
+
+    state = deepcopy(state_to_run)
+    time_range = effective_start_time:dt:end_time
+    
+    # --- Setup for file-based output ---
+    next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
+    if output_dir !== nothing
+        mkpath(output_dir)
+    end
+    
+    @showprogress "Simulating (Real Data)..." for (step, time) in enumerate(time_range)
+        if time == effective_start_time; continue; end
         state.time = time
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
+        horizontal_transport!(state, grid, dt, advection_scheme)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
+
+        # --- Save state to disk if configured ---
+        if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
+            output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
+            JLD2.save_object(output_filename, state)
+            next_output_time += output_interval
+        end
     end
     return state
 end
 
+# This function remains for in-memory storage
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
-                                  advection_scheme::Symbol=:TVD) # <-- NEW ARGUMENT
+                                  advection_scheme::Symbol=:TVD)
     state = deepcopy(initial_state)
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -90,7 +153,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt, advection_scheme) # <-- PASS ARGUMENT
+        horizontal_transport!(state, grid, dt, advection_scheme)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt)
 
@@ -104,3 +167,4 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 end
 
 end # module TimeSteppingModule
+

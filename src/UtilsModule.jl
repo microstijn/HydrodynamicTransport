@@ -2,46 +2,112 @@
 
 module UtilsModule
 
-export estimate_stable_timestep, create_hydrodynamic_data_from_file
+export estimate_stable_timestep
+export create_hydrodynamic_data_from_file
+export lonlat_to_ij
 
 using NCDatasets
 using ..HydrodynamicTransport.ModelStructs
 
 """
-    estimate_stable_timestep(filepath::String; ...)
+    estimate_stable_timestep(hydro_data::HydrodynamicData; 
+                             pm_var="pm", 
+                             pn_var="pn", 
+                             safety_factor=0.8,
+                             time_samples=3)
 
-Estimates a stable timestep (dt) for the advection scheme based on the 
-Courant-Friedrichs-Lewy (CFL) condition.
-... (full docstring from previous response) ...
+Estimates a stable timestep (dt) based on the CFL condition. By default, it uses a
+fast sampling method, checking a few time steps (`time_samples`) instead of the
+entire dataset. To check the full dataset (slower but more accurate), set
+`time_samples=nothing`.
+
+# Arguments
+- `hydro_data`: The `HydrodynamicData` object for the simulation.
+- `pm_var`, `pn_var`: Names of the grid metric variables.
+- `safety_factor`: Factor to reduce the calculated timestep for safety.
+- `time_samples`: Number of time steps to sample. Set to `nothing` to scan the entire dataset.
 """
-function estimate_stable_timestep(filepath::String; 
-                                 u_var="u", v_var="v", pm_var="pm", pn_var="pn", 
-                                 safety_factor=0.8)
+function estimate_stable_timestep(hydro_data::HydrodynamicData; 
+                                 pm_var="pm", 
+                                 pn_var="pn", 
+                                 safety_factor=0.8,
+                                 time_samples::Union{Int, Nothing}=3)
     
+    filepath = hydro_data.filepath
     println("--- Estimating Stable Timestep from '$filepath' ---")
-    local u_max, v_max, dx_min, dy_min
+    
+    u_var = get(hydro_data.var_map, :u, "u")
+    v_var = get(hydro_data.var_map, :v, "v")
+
+    local u_max, v_max
+    
     try
         ds = NCDataset(filepath)
+
+        # 1. Find minimum grid spacing (fast, as pm/pn are 2D)
         if !haskey(ds, pm_var) || !haskey(ds, pn_var); error("Grid metric variables '$pm_var' or '$pn_var' not found."); end
-        dx_min = 1 / maximum(ds[pm_var][:]); dy_min = 1 / maximum(ds[pn_var][:])
+        dx_min = 1 / maximum(ds[pm_var]; init=0.0)
+        dy_min = 1 / maximum(ds[pn_var]; init=0.0)
         println("Minimum grid spacing: dx ≈ $(round(dx_min, digits=2))m, dy ≈ $(round(dy_min, digits=2))m")
+
+        # 2. Find maximum velocities
         if !haskey(ds, u_var) || !haskey(ds, v_var); error("Velocity variables '$u_var' or '$v_var' not found."); end
-        u_max = maximum(abs.(ds[u_var][:]); init=0.0); v_max = maximum(abs.(ds[v_var][:]); init=0.0)
-        println("Maximum grid-aligned velocities: u_max ≈ $(round(u_max, digits=2))m/s, v_max ≈ $(round(v_max, digits=2))m/s")
+        
+        if time_samples === nothing
+            # --- SLOW PATH: Iterate over the entire remote dataset (most accurate) ---
+            println("Scanning entire dataset for maximum velocities (this may be slow)...")
+            u_max = maximum(abs, ds[u_var]; init=0.0)
+            v_max = maximum(abs, ds[v_var]; init=0.0)
+        else
+            # --- FAST PATH: Sample a few time steps (default) ---
+            println("Sampling $time_samples time steps for maximum velocities...")
+            time_dim = ds[u_var].dim[end]
+            n_times = ds.dim[time_dim]
+            
+            indices_to_sample = round.(Int, range(1, stop=n_times, length=time_samples))
+            
+            u_max_samples = Float64[]
+            v_max_samples = Float64[]
+            
+            # The number of dimensions can vary, find the time dimension index
+            time_dim_idx = findfirst(d -> d == time_dim, ds[u_var].dim)
+
+            for t_idx in unique(indices_to_sample)
+                # Build the correct indexer for this variable's dimensions
+                slicer = [(:) for _ in 1:length(ds[u_var].dim)]
+                slicer[time_dim_idx] = t_idx
+                
+                # Load only this time slice into memory and find its max
+                u_slice = ds[u_var][slicer...]
+                v_slice = ds[v_var][slicer...]
+                push!(u_max_samples, maximum(abs.(u_slice); init=0.0))
+                push!(v_max_samples, maximum(abs.(v_slice); init=0.0))
+            end
+            
+            u_max = maximum(u_max_samples)
+            v_max = maximum(v_max_samples)
+        end
+        
+        println("Maximum grid-aligned velocities found: u_max ≈ $(round(u_max, digits=2))m/s, v_max ≈ $(round(v_max, digits=2))m/s")
         close(ds)
+
+        # 3. Apply the CFL condition
         if u_max < 1e-9 && v_max < 1e-9; @warn "Velocities are zero."; return Inf; end
+        
         dt_cfl = 1 / (u_max / dx_min + v_max / dy_min)
         safe_dt = dt_cfl * safety_factor
+        
         println("--------------------------------------------------")
         println("Recommended stable timestep (dt): $(round(safe_dt, digits=2)) seconds")
         println(" (Based on a CFL safety factor of $safety_factor)")
         println("--------------------------------------------------")
+        
         return safe_dt
+
     catch e
         println("Error during timestep estimation: $e"); return -1.0
     end
 end
-
 
 """
     create_hydrodynamic_data_from_file(filepath::String) -> HydrodynamicData
@@ -109,5 +175,53 @@ function create_hydrodynamic_data_from_file(filepath::String)
     return HydrodynamicData(filepath, variable_map)
 end
 
+"""
+    lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64) -> (Int, Int)
+
+Finds the physical grid indices (i, j) that are closest to a given
+longitude and latitude.
+
+This function iterates through all physical grid points to find the minimum
+Euclidean distance. If multiple points are equidistant (a tie), a warning is
+issued and the indices of the first point found are returned.
+"""
+function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
+    ng = grid.ng
+    nx, ny = grid.nx, grid.ny
+    
+    min_dist_sq = Inf
+    best_ij = (-1, -1)
+    tie_count = 0
+
+    # Loop through the physical domain only
+    for j_phys in 1:ny
+        for i_phys in 1:nx
+            i_glob, j_glob = i_phys + ng, j_phys + ng
+
+            # Calculate squared Euclidean distance (more efficient than sqrt)
+            dist_sq = (grid.lon_rho[i_glob, j_glob] - lon)^2 + (grid.lat_rho[i_glob, j_glob] - lat)^2
+
+            if dist_sq < min_dist_sq
+                min_dist_sq = dist_sq
+                best_ij = (i_phys, j_phys)
+                tie_count = 1 # Reset tie counter
+            elseif dist_sq == min_dist_sq
+                tie_count += 1 # A tie is detected
+            end
+        end
+    end
+
+    # Issue a warning if a tie was detected 
+    if tie_count > 1
+        @warn "Multiple grid points are equidistant to the target coordinates ($lon, $lat). " *
+              "Returning the first match found: (i=$(best_ij[1]), j=$(best_ij[2]))."
+    end
+
+    if best_ij == (-1, -1)
+        error("Could not find any valid grid points. The grid might be empty or fully masked.")
+    end
+
+    return best_ij
+end
 
 end # module UtilsModule

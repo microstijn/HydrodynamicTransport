@@ -58,6 +58,8 @@ export run_simulation, run_and_store_simulation
 #export run_all_tests, run_integration_tests
 
 # Functions from UtilsModule.jl
-export estimate_stable_timestep, create_hydrodynamic_data_from_file
+export estimate_stable_timestep
+export create_hydrodynamic_data_from_file
+export lonlat_to_ij
 
 end # module HydrodynamicTransport

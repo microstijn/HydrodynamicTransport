@@ -176,52 +176,63 @@ function create_hydrodynamic_data_from_file(filepath::String)
 end
 
 """
-    lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64) -> (Int, Int)
+    lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64) -> Union{Tuple{Int, Int}, Nothing}
 
-Finds the physical grid indices (i, j) that are closest to a given
-longitude and latitude.
+Finds the physical grid indices (i, j) of the water cell center closest to the target
+geographic coordinates (longitude, latitude).
 
-This function iterates through all physical grid points to find the minimum
-Euclidean distance. If multiple points are equidistant (a tie), a warning is
-issued and the indices of the first point found are returned.
+If the target coordinates are outside the grid's geographic bounding box, or if no
+water cells are found nearby, it returns `nothing` and issues a warning.
 """
 function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
-    ng = grid.ng
     nx, ny = grid.nx, grid.ny
+    ng = grid.ng
     
+    # Determine the geographic bounding box of the physical grid
+    physical_lon = view(grid.lon_rho, ng+1:nx+ng, ng+1:ny+ng)
+    physical_lat = view(grid.lat_rho, ng+1:nx+ng, ng+1:ny+ng)
+    
+    lon_min, lon_max = extrema(physical_lon)
+    lat_min, lat_max = extrema(physical_lat)
+
+    # Check if the target point is within the bounding box
+    if !(lon_min <= lon <= lon_max && lat_min <= lat <= lat_max)
+        @warn "Target coordinates ($lon, $lat) are outside the grid's geographic bounding box."
+        return nothing
+    end
+
     min_dist_sq = Inf
-    best_ij = (-1, -1)
-    tie_count = 0
+    best_i, best_j = -1, -1
+    is_tie = false
 
-    # Loop through the physical domain only
-    for j_phys in 1:ny
-        for i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
-
-            # Calculate squared Euclidean distance (more efficient than sqrt)
+    for j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        
+        # Only consider water points in the search
+        if grid.mask_rho[i_glob, j_glob]
             dist_sq = (grid.lon_rho[i_glob, j_glob] - lon)^2 + (grid.lat_rho[i_glob, j_glob] - lat)^2
-
+            
             if dist_sq < min_dist_sq
                 min_dist_sq = dist_sq
-                best_ij = (i_phys, j_phys)
-                tie_count = 1 # Reset tie counter
+                best_i, best_j = i_phys, j_phys
+                is_tie = false
             elseif dist_sq == min_dist_sq
-                tie_count += 1 # A tie is detected
+                is_tie = true
             end
         end
     end
-
-    # Issue a warning if a tie was detected 
-    if tie_count > 1
+    
+    if best_i == -1
+        @warn "Target coordinates ($lon, $lat) are within the bounding box, but no water cells were found nearby. The closest cells may all be land."
+        return nothing
+    end
+    
+    if is_tie
         @warn "Multiple grid points are equidistant to the target coordinates ($lon, $lat). " *
-              "Returning the first match found: (i=$(best_ij[1]), j=$(best_ij[2]))."
+              "Returning the first match found: (i=$best_i, j=$best_j)."
     end
 
-    if best_ij == (-1, -1)
-        error("Could not find any valid grid points. The grid might be empty or fully masked.")
-    end
-
-    return best_ij
+    return best_i, best_j
 end
 
 end # module UtilsModule

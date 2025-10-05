@@ -8,7 +8,6 @@ using ..HydrodynamicTransport.ModelStructs
 
 """
     rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
-... (this function is unchanged) ...
 """
 function rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
     ng = grid.ng

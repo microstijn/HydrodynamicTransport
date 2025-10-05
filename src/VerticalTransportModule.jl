@@ -18,7 +18,7 @@ function solve_implicit_diffusion_column!(
     nz = length(C_in_col)
     if nz <= 1; C_out_col .= C_in_col; return; end
     
-    dz = [grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k] for k in 1:nz]
+    @inbounds dz = [grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k] for k in 1:nz]
     alpha = 0.5 * Kz * dt ./ (dz .* dz)
     
     lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
@@ -35,7 +35,7 @@ function solve_implicit_diffusion_column!(
     C_out_col .= A \ rhs
 end
 
-# --- NEW: Diffusion Solver for a single Curvilinear column ---
+# --- Diffusion Solver for a single Curvilinear column ---
 function solve_implicit_diffusion_column!(
     C_out_col::AbstractVector,
     C_in_col::AbstractVector,
@@ -46,8 +46,7 @@ function solve_implicit_diffusion_column!(
     nz = length(C_in_col)
     if nz <= 1; C_out_col .= C_in_col; return; end
 
-    # For curvilinear grids, dz is constant horizontally and derived from z_w
-    dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
+    @inbounds dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
     alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
     
     lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
@@ -65,7 +64,7 @@ function solve_implicit_diffusion_column!(
 end
 
 
-# --- Main transport function (now fully ghost-cell aware and generic) ---
+# --- Main transport function ---
 function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Kz = 1e-4
     ng = grid.ng
@@ -74,32 +73,33 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
 
     for tracer_name in keys(state.tracers)
         C_final = state.tracers[tracer_name]
-        C_buffer = state._buffers[tracer_name] # Get the pre-allocated buffer
+        C_buffer = state._buffers[tracer_name]
 
-        # --- 1. Advection Step (Grid-wide) ---
-        # The logic here reads from C_final and stores the advected result in C_buffer
-        for j_phys in 1:ny, i_phys in 1:nx
+        # --- 1. Advection Step ---
+        @inbounds for j_phys in 1:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_final[i_glob, j_glob, :] # Read from original data
-            C_col_out = view(C_buffer, i_glob, j_glob, :) # Write advected result to buffer
+            C_col_in = C_final[i_glob, j_glob, :]
+            C_col_out = view(C_buffer, i_glob, j_glob, :)
             
-            flux_z = zeros(nz + 1)
+            # Use a view into the pre-allocated 3D flux buffer
+            flux_z_col = view(state.flux_z, i_glob, j_glob, :)
+            flux_z_col .= 0.0
+
             for k in 2:nz
                 velocity = state.w[i_glob, j_glob, k]
                 concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
                 
-                # Use correct face area depending on grid type
                 face_area = if isa(grid, CartesianGrid)
                     grid.face_area_z[i_glob, j_glob, k]
                 else # CurvilinearGrid
                     1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
                 end
-                flux_z[k] = velocity * concentration_at_face * face_area
+                flux_z_col[k] = velocity * concentration_at_face * face_area
             end
 
             for k in 1:nz
-                flux_divergence = flux_z[k+1] - flux_z[k]
+                flux_divergence = flux_z_col[k+1] - flux_z_col[k]
                 volume = grid.volume[i_glob, j_glob, k]
                 if volume > 0
                     C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
@@ -109,16 +109,13 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
             end
         end
 
-        # --- 2. Diffusion Step (Grid-wide, using the correct helper) ---
-        # The logic now reads from the buffer (C_buffer) and writes the final result back to C_final.
-        for j_phys in 1:ny, i_phys in 1:nx
-            # --- FIX: Correctly calculate j_glob from j_phys ---
+        # --- 2. Diffusion Step ---
+        @inbounds for j_phys in 1:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_buffer[i_glob, j_glob, :] # Read from buffer
-            C_col_out = view(C_final, i_glob, j_glob, :) # Write final result to tracer array
+            C_col_in = C_buffer[i_glob, j_glob, :]
+            C_col_out = view(C_final, i_glob, j_glob, :)
             
-            # This will now dispatch to the correct method based on grid type
             solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
         end
     end

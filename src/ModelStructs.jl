@@ -36,8 +36,11 @@ end
 
 mutable struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
-    _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary calculations
+    _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary tracer calculations
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
+    flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
+    flux_y::Array{Float64, 3} # Pre-allocated buffer for y-direction fluxes
+    flux_z::Array{Float64, 3} # Pre-allocated buffer for z-direction fluxes
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
     time::Float64

@@ -7,7 +7,31 @@ export horizontal_transport!
 using ..HydrodynamicTransport.ModelStructs
 using StaticArrays
 
-# --- Main Dispatcher Function ---
+
+"""
+    horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol)
+
+Computes the change in tracer concentrations due to horizontal transport processes
+(advection and diffusion) over a single time step.
+
+This function acts as the main dispatcher for horizontal transport. It uses operator
+splitting to solve the transport equation in two stages:
+1.  **Advection**: Solved first in the x-direction, then in the y-direction. The result
+    of the x-advection is stored in a buffer and used as input for the y-advection.
+2.  **Diffusion**: Solved similarly, first in x and then in y.
+
+The specific advection algorithm is chosen via the `scheme` argument.
+
+# Arguments
+- `state::State`: The model state, which is modified in-place.
+- `grid::AbstractGrid`: The computational grid.
+- `dt::Float64`: The time step duration.
+- `scheme::Symbol`: The advection scheme to use. Options are `:TVD` (Total Variation
+  Diminishing) and `:UP3` (Upstream-Biased 3rd-Order).
+
+# Returns
+- `nothing`: The function modifies `state.tracers` in-place.
+"""
 function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol)
     Kh = 1.0 
     for tracer_name in keys(state.tracers)
@@ -134,6 +158,20 @@ end
 # --- SCHEME 2: Total Variation Diminishing (TVD) based on Bott Scheme ---
 # ==============================================================================
 
+"""
+    calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
+
+Calculates the coefficients of a 4th-order polynomial that interpolates the
+concentration profile over a 5-point stencil. This is a core component of the
+Bott (1989) advection scheme.
+
+# Arguments
+- `c_im2`, `c_im1`, `c_i`, `c_ip1`, `c_ip2`: Concentration values at five consecutive
+  grid points (i-2, i-1, i, i+1, i+2).
+
+# Returns
+- `(a0, a1, a2, a3, a4)`: A tuple of the five polynomial coefficients.
+"""
 @inline function calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
     a1 = (c_ip1 - c_im1) / 2.0
     a3 = (c_ip2 - 2*c_ip1 + 2*c_im1 - c_im2) / 12.0 - (2/3.0) * a1
@@ -142,10 +180,55 @@ end
     return a0, a1, a2, a3, a4
 end
 
+"""
+    _indefinite_integral_poly4(xi, a0, a1, a2, a3, a4)
+
+Analytically computes the indefinite integral of the 4th-order polynomial defined
+by the given coefficients. The integration is performed with respect to the normalized
+coordinate `xi`.
+
+# Arguments
+- `xi`: The normalized coordinate (from -0.5 to 0.5) at which to evaluate the integral.
+- `a0` to `a4`: The coefficients of the polynomial.
+
+# Returns
+- `Float64`: The value of the indefinite integral at `xi`.
+"""
 @inline function _indefinite_integral_poly4(xi, a0, a1, a2, a3, a4)
     return xi * (a0 + xi/2 * (a1 + xi/3 * (a2 + xi/4 * (a3 + xi/5 * a4))))
 end
 
+
+"""
+    advect_x_tvd!(C_out, C_in, u, grid, dt)
+
+Performs advection in the x-direction using a Total Variation Diminishing (TVD)
+scheme based on the work of Bott (1989).
+
+This function calculates advective fluxes across x-faces. For the deep interior of
+the domain, it employs a high-order method:
+1.  A 4th-order polynomial is fitted to a 5-point stencil around the donor cell.
+2.  This polynomial is analytically integrated over the volume of fluid that crosses
+    the cell face during the time step to calculate a high-order flux.
+3.  A flux limiter (`phi`) is calculated to blend the high-order flux with a
+    low-order (1st-order upwind) flux. This ensures that the scheme is TVD,
+    preventing the formation of new, unphysical oscillations.
+4.  The final flux is constrained to be between the concentrations of the donor
+    and receiver cells to maintain monotonicity.
+
+For faces near the domain boundaries, the function reverts to a simple and robust
+1st-order upwind scheme.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `u`: The u-component of velocity.
+- `grid`: The computational grid.
+- `dt`: The time step.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
 function advect_x_tvd!(C_out, C_in, u, grid::AbstractGrid, dt, fluxes_x)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
@@ -156,6 +239,27 @@ function advect_x_tvd!(C_out, C_in, u, grid::AbstractGrid, dt, fluxes_x)
     @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx; i_glob, j_glob = i_phys + ng, j_phys + ng; flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]; C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence; end
 end
 
+"""
+    advect_y_tvd!(C_out, C_in, v, grid, dt)
+
+Performs advection in the y-direction using a Total Variation Diminishing (TVD)
+scheme based on the work of Bott (1989).
+
+This function is the y-direction counterpart to `advect_x_tvd!`. It calculates
+advective fluxes across y-faces, using a high-order, flux-limited scheme for the
+domain interior and a 1st-order upwind scheme near the boundaries to ensure
+stability and monotonicity.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `v`: The v-component of velocity.
+- `grid`: The computational grid.
+- `dt`: The time step.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
 function advect_y_tvd!(C_out, C_in, v, grid::AbstractGrid, dt, fluxes_y)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
@@ -169,6 +273,26 @@ end
 # --- Diffusion and Helper Functions ---
 # ==============================================================================
 
+"""
+    diffuse_x!(C_out, C_in, grid, dt, Kh)
+
+Calculates the change in concentration due to horizontal diffusion in the x-direction.
+
+This function computes diffusive fluxes across the x-faces of the grid cells based on
+the concentration gradient and the horizontal diffusivity coefficient `Kh`. It updates
+the `C_out` array based on the divergence of these fluxes. A no-flux condition is
+enforced at land boundaries by checking the grid mask.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `grid`: The computational grid.
+- `dt`: The time step.
+- `Kh`: The horizontal diffusion coefficient.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
 function diffuse_x!(C_out, C_in, grid, dt, Kh, fluxes_x)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
@@ -192,6 +316,26 @@ function diffuse_x!(C_out, C_in, grid, dt, Kh, fluxes_x)
     end
 end
 
+
+"""
+    diffuse_y!(C_out, C_in, grid, dt, Kh)
+
+Calculates the change in concentration due to horizontal diffusion in the y-direction.
+
+This function computes diffusive fluxes across the y-faces of the grid cells. It is
+the y-direction counterpart to `diffuse_x!`. A no-flux condition is enforced at land
+boundaries.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `grid`: The computational grid.
+- `dt`: The time step.
+- `Kh`: The horizontal diffusion coefficient.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
 function diffuse_y!(C_out, C_in, grid, dt, Kh, fluxes_y)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng

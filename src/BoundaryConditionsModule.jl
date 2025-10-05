@@ -6,6 +6,37 @@ export apply_boundary_conditions!
 
 using ..HydrodynamicTransport.ModelStructs
 
+"""
+    apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition})
+
+Applies a set of boundary conditions to the model state by updating values in the ghost cells.
+
+This function modifies the `state` object in-place. It iterates through the domain boundaries
+and applies the specified conditions from the `bcs` vector. The logic is structured to
+handle different boundary types (`OpenBoundary`, `RiverBoundary`, `TidalBoundary`) and to
+correctly manage inflow and outflow conditions.
+
+The process is performed in two passes:
+1.  **East-West boundaries**: Updates ghost cells on the west and east sides.
+2.  **North-South boundaries**: Updates ghost cells on the north and south sides. This two-pass
+    approach ensures that corner cells are handled correctly.
+
+For each boundary, the function determines the appropriate action based on the velocity
+normal to that boundary:
+-   **Outflow**: A zero-gradient condition is applied, where the ghost cell values are set
+    equal to the values in the adjacent physical domain cell.
+-   **Inflow**: Ghost cell values are set according to the specific boundary condition rule.
+    For example, a `TidalBoundary` might specify time-varying tracer concentrations, while a
+    simple `OpenBoundary` might default to a concentration of zero.
+
+# Arguments
+- `state::State`: The current state of the model, which will be modified.
+- `grid::AbstractGrid`: The computational grid, providing dimensions and ghost cell information.
+- `bcs::Vector{<:BoundaryCondition}`: A vector of boundary condition objects to be applied.
+
+# Returns
+- `nothing`: The function modifies the `state` argument in-place.
+"""
 function apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition})
     ng = grid.ng
     nx, ny, _ = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)

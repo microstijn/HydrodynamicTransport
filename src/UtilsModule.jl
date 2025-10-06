@@ -187,28 +187,34 @@ water cells are found nearby, it returns `nothing` and issues a warning.
 function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
     nx, ny = grid.nx, grid.ny
     ng = grid.ng
-    
-    # Determine the geographic bounding box of the physical grid
-    physical_lon = view(grid.lon_rho, ng+1:nx+ng, ng+1:ny+ng)
-    physical_lat = view(grid.lat_rho, ng+1:nx+ng, ng+1:ny+ng)
-    
-    lon_min, lon_max = extrema(physical_lon)
-    lat_min, lat_max = extrema(physical_lat)
 
-    # Check if the target point is within the bounding box
-    if !(lon_min <= lon <= lon_max && lat_min <= lat <= lat_max)
-        @warn "Target coordinates ($lon, $lat) are outside the grid's geographic bounding box."
+    # --- FIX: Calculate the bounding box using ONLY the valid water points ---
+    # This prevents missing/fill values from skewing the calculation.
+    water_points_mask = view(grid.mask_rho, ng+1:nx+ng, ng+1:ny+ng)
+    if !any(water_points_mask)
+        @warn "The provided grid has no water points (all cells are masked as land)."
         return nothing
     end
 
+    lon_phys = view(grid.lon_rho, ng+1:nx+ng, ng+1:ny+ng)
+    lat_phys = view(grid.lat_rho, ng+1:nx+ng, ng+1:ny+ng)
+    
+    lon_min, lon_max = extrema(lon_phys[water_points_mask])
+    lat_min, lat_max = extrema(lat_phys[water_points_mask])
+
+    if !(lon_min <= lon <= lon_max) || !(lat_min <= lat <= lat_max)
+        @warn "Target coordinates ($lon, $lat) are outside the grid's geographic bounding box of water points. Lon: [$lon_min, $lon_max], Lat: [$lat_min, $lat_max]."
+        return nothing
+    end
+    
     min_dist_sq = Inf
     best_i, best_j = -1, -1
     is_tie = false
 
-    for j_phys in 1:ny, i_phys in 1:nx
+    @inbounds for j_phys in 1:ny, i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         
-        # Only consider water points in the search
+        # Search only over water cells
         if grid.mask_rho[i_glob, j_glob]
             dist_sq = (grid.lon_rho[i_glob, j_glob] - lon)^2 + (grid.lat_rho[i_glob, j_glob] - lat)^2
             
@@ -223,10 +229,10 @@ function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
     end
     
     if best_i == -1
-        @warn "Target coordinates ($lon, $lat) are within the bounding box, but no water cells were found nearby. The closest cells may all be land."
+        @warn "Target coordinates ($lon, $lat) are within the bounding box but no water cells were found."
         return nothing
     end
-    
+
     if is_tie
         @warn "Multiple grid points are equidistant to the target coordinates ($lon, $lat). " *
               "Returning the first match found: (i=$best_i, j=$best_j)."
@@ -234,5 +240,6 @@ function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
 
     return best_i, best_j
 end
+
 
 end # module UtilsModule

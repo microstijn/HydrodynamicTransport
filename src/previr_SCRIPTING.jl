@@ -8,7 +8,6 @@ using UnicodePlots
 using NCDatasets
 
 f = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
-f = "https://ns9081k.hyrax.sigma2.no/opendap/K160_bgc/Sim2/ocean_his_0001.nc"
 hydro_data = create_hydrodynamic_data_from_file(f)
 
 # lets get the grid going
@@ -25,7 +24,7 @@ bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:No
 
 start_time = 0.0 # Start from the beginning of the dataset
 dt = 6.0
-end_time = 30 * 60 * 1.0 # Run for 12 hours to keep the test quick
+end_time = 12 * 60 * 60.0 # Run for 12 hours to keep the test quick
 
 # --- Output Configuration ---
 # Directory where the output .jld2 files will be saved
@@ -49,6 +48,20 @@ final_state = run_simulation(
     restart_from=restart_file
 )
 
-70heatmap(
-    final_state
+tracer_phys = view(
+    final_state.tracers[:Tracer],
+    grid.ng+1:grid.nx+grid.ng,
+    grid.ng+1:grid.ny+grid.ng,
+    1
 )
+
+println(
+    heatmap(
+        tracer_phys',
+        title="Final Tracer Concentration (Console)",
+        colormap=:viridis,
+        labels=false,
+        colorbar= true,
+        width = 50)
+    )
+contourplot(tracer_phys', colorbar= true, width = 50, height = 50)

@@ -127,20 +127,18 @@ to identify velocities, salinity, temperature, and time.
 function create_hydrodynamic_data_from_file(filepath::String)
     println("--- Autodetecting variables from '$filepath' ---")
     variable_map = Dict{Symbol, String}()
-
-    # Define the search criteria for each target variable
-    # The search is ordered by priority: standard_name, long_name, then variable name.
+    
+    # --- FIX: Prioritize 3D baroclinic velocities (uz, vz) over 2D barotropic (u, v) ---
     search_patterns = Dict(
-        :u => [("standard_name", "sea_water_x_velocity"), ("long_name", "u-velocity"), ("var_name", ("u", "U"))],
-        :v => [("standard_name", "sea_water_y_velocity"), ("long_name", "v-velocity"), ("var_name", ("v", "V"))],
+        :u => [("standard_name", "sea_water_x_velocity"), ("long_name", "u-velocity"), ("var_name", ("uz", "u", "U"))],
+        :v => [("standard_name", "sea_water_y_velocity"), ("long_name", "v-velocity"), ("var_name", ("vz", "v", "V"))],
         :salt => [("standard_name", "sea_water_salinity"), ("long_name", "salinity"), ("var_name", ("salt", "sal", "SAL"))],
-        :temp => [("standard_name", "sea_water_temperature"), ("long_name", "temperature"), ("var_name", ("temp", "TEMP"))],
+        :temp => [("standard_name", "sea_water_potential_temperature"), ("long_name", "temperature"), ("var_name", ("temp", "TEMP"))],
         :time => [("standard_name", "time"), ("long_name", "time"), ("var_name", ("time", "ocean_time"))]
     )
-
+    
     ds = NCDataset(filepath)
     file_vars = keys(ds)
-
     for (target_symbol, patterns) in search_patterns
         found = false
         for (search_type, pattern) in patterns
@@ -148,29 +146,21 @@ function create_hydrodynamic_data_from_file(filepath::String)
             for var_name in file_vars
                 if search_type == "var_name"
                     if lowercase(var_name) in pattern
-                        variable_map[target_symbol] = var_name
-                        println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by variable name)")
-                        found = true
-                        break
+                        variable_map[target_symbol] = var_name; println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by variable name)"); found = true; break
                     end
-                else # Search attributes
+                else 
                     if haskey(ds[var_name].attrib, search_type)
                         attr_value = lowercase(ds[var_name].attrib[search_type])
-                        if occursin(pattern, attr_value)
-                            variable_map[target_symbol] = var_name
-                            println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by attribute '$(search_type)')")
-                            found = true
-                            break
+                        # Add a check to exclude barotropic velocities when searching for standard_name
+                        if occursin(pattern, attr_value) && !occursin("barotropic", attr_value)
+                            variable_map[target_symbol] = var_name; println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by attribute '$(search_type)')"); found = true; break
                         end
                     end
                 end
             end
         end
-        if !found
-            println("  - Warning: Could not find a variable for :$(target_symbol)")
-        end
+        if !found; println("  - Warning: Could not find a variable for :$(target_symbol)"); end
     end
-
     close(ds)
     return HydrodynamicData(filepath, variable_map)
 end

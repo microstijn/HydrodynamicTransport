@@ -45,70 +45,32 @@ end
 # --- Refactored Real Data Hydrodynamics with Corrected Interpolation ---
 function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
     ng = grid.ng
+    time_var_name = get(hydro_data.var_map, :time, "time"); time_dim_raw = ds[time_var_name][:]
+    time_dim_seconds = if eltype(time_dim_raw) <: DateTime; t0 = time_dim_raw[1]; [(dt - t0).value / 1000.0 for dt in time_dim_raw]; else; time_dim_raw; end
+    local idx1, idx2, weight; n_times = length(time_dim_seconds)
+    if time <= time_dim_seconds[1]; idx1 = 1; idx2 = 1; weight = 0.0
+    elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
+    else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
     
-    time_var_name = get(hydro_data.var_map, :time, "time")
-    time_dim_raw = ds[time_var_name][:]
-    
-    time_dim_seconds = if eltype(time_dim_raw) <: DateTime
-        t0 = time_dim_raw[1]
-        [(dt - t0).value / 1000.0 for dt in time_dim_raw]
-    else
-        time_dim_raw
-    end
-    
-    # --- FIX: New, robust logic for finding indices and weight ---
-    local idx1, idx2, weight
-    n_times = length(time_dim_seconds)
-
-    if time <= time_dim_seconds[1] # Clamping before the start
-        idx1 = 1
-        idx2 = 1
-        weight = 0.0
-    elseif time >= time_dim_seconds[n_times] # Clamping after the end
-        idx1 = n_times
-        idx2 = n_times
-        weight = 0.0
-    else # Standard interpolation case
-        idx1 = searchsortedlast(time_dim_seconds, time)
-        idx2 = idx1 + 1
-        
-        t1 = time_dim_seconds[idx1]
-        t2 = time_dim_seconds[idx2]
-        
-        time_interval = t2 - t1
-        # Ensure weight is 0 if time interval is zero to prevent NaN
-        weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0
-    end
-    
+    # --- UPDATED: Use dimension names from MARS3D file ---
     fields_to_load = [
-        (state.u, :u, "xi_u", "eta_u", "s_rho"),
-        (state.v, :v, "xi_v", "eta_v", "s_rho"),
-        (state.w, :w, "xi_rho", "eta_rho", "s_w"),
-        (state.temperature, :temp, "xi_rho", "eta_rho", "s_rho"),
-        (state.salinity, :salt, "xi_rho", "eta_rho", "s_rho"),
+        (state.u, :u, "ni_u", "nj_u", "level"),
+        (state.v, :v, "ni_v", "nj_v", "level"),
+        # (state.w, :w, ...), # W is not available in 3D in this file
+        (state.temperature, :temp, "ni", "nj", "level"),
+        (state.salinity, :salt, "ni", "nj", "level"),
     ]
 
     for (state_field, standard_name, x_dim, y_dim, z_dim) in fields_to_load
         if haskey(hydro_data.var_map, standard_name)
             nc_var_name = hydro_data.var_map[standard_name]
             if haskey(ds, nc_var_name)
-                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]
-                nz_phys = ds.dim[z_dim]
+                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]; nz_phys = ds.dim[z_dim]
                 interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
-                
-                # Load data from the first bracketing time step
                 data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
-                
-                # If weight is non-zero, perform interpolation. Otherwise, just use data_slice1.
-                if weight > 1e-9
-                    data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0)
-                    interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
-                else
-                    interior_view .= data_slice1
-                end
-            else
-                @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."
-            end
+                if weight > 1e-9; data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0); interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
+                else; interior_view .= data_slice1; end
+            else; @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."; end
         end
     end
     return nothing

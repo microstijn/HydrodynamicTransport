@@ -82,7 +82,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
+        source_sink_terms!(state, grid, sources, time, dt, D_crit)
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -111,7 +111,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
+        source_sink_terms!(state, grid, sources, time, dt, D_crit)
         
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))
@@ -192,7 +192,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
+        source_sink_terms!(state, grid, sources, time, dt, D_crit)
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -221,7 +221,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt)
+        source_sink_terms!(state, grid, sources, time, dt, D_crit)
 
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))

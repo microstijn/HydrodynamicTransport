@@ -51,6 +51,7 @@ end
     i::Int; j::Int; k::Int # Physical indices (1-based from the corner of the physical domain)
     tracer_name::Symbol
     influx_rate::Function # time -> value
+    relocate_if_dry::Bool = false
 end
 
 abstract type BoundaryCondition end

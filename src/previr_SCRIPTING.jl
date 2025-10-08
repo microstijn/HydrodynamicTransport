@@ -8,7 +8,6 @@ using UnicodePlots
 using NCDatasets
 
 
-
 f = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
 hydro_data = create_hydrodynamic_data_from_file(f)
 

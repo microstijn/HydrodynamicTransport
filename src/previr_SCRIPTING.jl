@@ -7,6 +7,8 @@ using HydrodynamicTransport
 using UnicodePlots
 using NCDatasets
 
+
+
 f = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
 hydro_data = create_hydrodynamic_data_from_file(f)
 
@@ -65,3 +67,10 @@ println(
         width = 50)
     )
 contourplot(tracer_phys', colorbar= true, width = 50, height = 50)
+
+
+
+
+
+
+

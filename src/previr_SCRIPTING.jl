@@ -26,18 +26,18 @@ bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:No
 
 start_time = 0.0 # Start from the beginning of the dataset
 dt = 6.0
-end_time = 12 * 60 * 60.0 # Run for 12 hours to keep the test quick
+end_time = 1 * 60 * 60.0 # Run for 12 hours to keep the test quick
 
 # --- Output Configuration ---
 # Directory where the output .jld2 files will be saved
 out = raw"D:\PreVir\test_states"
 
 # How often to save the state, in simulation seconds (e.g., 3600.0 for every hour)
-out_interval_sec = 30*10.0
+out_interval_sec = 60*60.0
 
 # --- Restart Configuration ---
 # To restart a simulation, set this to the path of a saved state file.
-# For example: const RESTART_FILE = "norway_output/state_t_43200.jld2"
+# For example:  RESTART_FILE = "norway_output/state_t_43200.jld2"
 # To start a new simulation, set this to `nothing`.
 restart_file = nothing
 
@@ -45,6 +45,7 @@ final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
     boundary_conditions=bcs,
     advection_scheme=:TVD,
+    D_crit = 0.05,
     output_dir=out,
     output_interval=out_interval_sec,
     restart_from=restart_file

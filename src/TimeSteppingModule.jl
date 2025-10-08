@@ -15,6 +15,36 @@ using NCDatasets
 using JLD2 # Added for saving state objects
 
 # --- Test/Placeholder Versions ---
+"""
+    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; ...)
+
+Runs a simulation using placeholder hydrodynamics.
+
+This function orchestrates the main simulation loop, stepping through time and calling the
+necessary physics modules at each step. It is designed for test cases or scenarios where
+hydrodynamic data is not read from a file.
+
+# Arguments
+- `grid::AbstractGrid`: The computational grid.
+- `initial_state::State`: The initial state of the model.
+- `sources::Vector{PointSource}`: A vector of point sources for tracers.
+- `start_time::Float64`: The simulation start time in seconds.
+- `end_time::Float64`: The simulation end time in seconds.
+- `dt::Float64`: The time step duration in seconds.
+
+# Keyword Arguments
+- `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
+- `advection_scheme::Symbol`: The advection scheme to use (`:TVD` or `:UP3`). Defaults to `:TVD`.
+- `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
+  depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
+  cell face are blocked. Defaults to `0.0`.
+- `output_dir::Union{String, Nothing}`: Directory to save state snapshots. If `nothing`, no output is saved.
+- `output_interval::Union{Float64, Nothing}`: Time interval in seconds for saving state snapshots.
+- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from.
+
+# Returns
+- `State`: The final state of the model after the simulation.
+"""
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         advection_scheme::Symbol=:TVD,
@@ -93,6 +123,38 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 end
 
 # --- Real Data Versions ---
+"""
+    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; ...)
+
+Runs a simulation using hydrodynamics from a NetCDF data source.
+
+This function orchestrates the main simulation loop, stepping through time and calling the
+necessary physics modules at each step. It is designed for realistic simulations where
+hydrodynamic data (like velocity fields and sea surface height) is read from a file.
+
+# Arguments
+- `grid::AbstractGrid`: The computational grid.
+- `initial_state::State`: The initial state of the model.
+- `sources::Vector{PointSource}`: A vector of point sources for tracers.
+- `ds::NCDataset`: An opened NetCDF dataset containing the hydrodynamic data.
+- `hydro_data::HydrodynamicData`: A struct mapping standard variable names to names in the NetCDF file.
+- `start_time::Float64`: The simulation start time in seconds.
+- `end_time::Float64`: The simulation end time in seconds.
+- `dt::Float64`: The time step duration in seconds.
+
+# Keyword Arguments
+- `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
+- `advection_scheme::Symbol`: The advection scheme to use (`:TVD` or `:UP3`). Defaults to `:TVD`.
+- `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
+  depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
+  cell face are blocked. Defaults to `0.0`.
+- `output_dir::Union{String, Nothing}`: Directory to save state snapshots. If `nothing`, no output is saved.
+- `output_interval::Union{Float64, Nothing}`: Time interval in seconds for saving state snapshots.
+- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from.
+
+# Returns
+- `State`: The final state of the model after the simulation.
+"""
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         advection_scheme::Symbol=:TVD,

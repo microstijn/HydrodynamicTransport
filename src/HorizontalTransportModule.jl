@@ -87,10 +87,10 @@ function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             # --- Cell-Face Blocking Logic ---
             if isa(grid, CurvilinearGrid)
                 if velocity > 0 # Flow is from left to right, check the left cell
-                    upstream_depth = grid.h[i_phys-1, j_phys] + state.zeta[i_glob-1, j_glob, k]
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 elseif velocity < 0 # Flow is from right to left, check the right cell
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 end
             end
@@ -112,16 +112,12 @@ function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
 
             # --- Cell-Face Blocking Logic ---
             if isa(grid, CurvilinearGrid)
-                if vel > 0 # Flow L->R, upstream cell is i_phys-1
-                    if i_phys > 1 # Ensure upstream cell is a physical cell
-                        upstream_depth = grid.h[i_phys-1, j_phys] + state.zeta[i_glob-1, j_glob, k]
-                        if upstream_depth < D_crit; vel = 0.0; end
-                    end
-                elseif vel < 0 # Flow R->L, upstream cell is i_phys
-                    if i_phys <= nx # Ensure upstream cell is a physical cell
-                        upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
-                        if upstream_depth < D_crit; vel = 0.0; end
-                    end
+                if vel > 0 # Flow L->R, upstream cell is i_glob-1
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                elseif vel < 0 # Flow R->L, upstream cell is i_glob
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
                 end
             end
             # --- End Cell-Face Blocking ---
@@ -158,10 +154,10 @@ function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             # --- Cell-Face Blocking Logic ---
             if isa(grid, CurvilinearGrid)
                 if velocity > 0 # Flow is from bottom to top, check bottom cell
-                    upstream_depth = grid.h[i_phys, j_phys-1] + state.zeta[i_glob, j_glob-1, k]
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 elseif velocity < 0 # Flow is from top to bottom, check top cell
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 end
             end
@@ -183,16 +179,12 @@ function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             
             # --- Cell-Face Blocking Logic ---
             if isa(grid, CurvilinearGrid)
-                if vel > 0 # Flow bottom->top, upstream cell is j_phys-1
-                    if j_phys > 1 # Ensure upstream cell is a physical cell
-                        upstream_depth = grid.h[i_phys, j_phys-1] + state.zeta[i_glob, j_glob-1, k]
-                        if upstream_depth < D_crit; vel = 0.0; end
-                    end
-                elseif vel < 0 # Flow top->bottom, upstream cell is j_phys
-                    if j_phys <= ny # Ensure upstream cell is a physical cell
-                        upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
-                        if upstream_depth < D_crit; vel = 0.0; end
-                    end
+                if vel > 0 # Flow bottom->top, upstream cell is j_glob-1
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                elseif vel < 0 # Flow top->bottom, upstream cell is j_glob
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
                 end
             end
             # --- End Cell-Face Blocking ---
@@ -305,10 +297,10 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
 
             if isa(grid, CurvilinearGrid)
                 if velocity > 0 # Flow L->R
-                    upstream_depth = grid.h[i_phys-1, j_phys] + state.zeta[i_glob-1, j_glob, k]
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 else # Flow R->L
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 end
             end
@@ -345,11 +337,11 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             i_glob = i_phys + ng
             vel = u[i_glob, j_glob, k]
             if isa(grid, CurvilinearGrid)
-                if vel > 0 && i_phys > 1
-                    upstream_depth = grid.h[i_phys-1, j_phys] + state.zeta[i_glob-1, j_glob, k]
+                if vel > 0
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
                     if upstream_depth < D_crit; vel = 0.0; end
-                elseif vel < 0 && i_phys <= nx
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                elseif vel < 0
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; vel = 0.0; end
                 end
             end
@@ -380,10 +372,10 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
 
             if isa(grid, CurvilinearGrid)
                 if velocity > 0 # Flow bottom->top
-                    upstream_depth = grid.h[i_phys, j_phys-1] + state.zeta[i_glob, j_glob-1, k]
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 else # Flow top->bottom
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; velocity = 0.0; end
                 end
             end
@@ -420,11 +412,11 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             j_glob = j_phys + ng
             vel = v[i_glob, j_glob, k]
             if isa(grid, CurvilinearGrid)
-                if vel > 0 && j_phys > 1
-                    upstream_depth = grid.h[i_phys, j_phys-1] + state.zeta[i_glob, j_glob-1, k]
+                if vel > 0
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
                     if upstream_depth < D_crit; vel = 0.0; end
-                elseif vel < 0 && j_phys <= ny
-                    upstream_depth = grid.h[i_phys, j_phys] + state.zeta[i_glob, j_glob, k]
+                elseif vel < 0
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
                     if upstream_depth < D_crit; vel = 0.0; end
                 end
             end
@@ -474,8 +466,8 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
             local flux = 0.0
             # --- Cell-Face Blocking Logic for Diffusion ---
             if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_phys-1, j_phys] + state.zeta[i_glob-1, j_glob, k]
-                depth2 = grid.h[i_phys, j_phys]   + state.zeta[i_glob, j_glob, k]
+                depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
                 if depth1 < D_crit || depth2 < D_crit
                     flux = 0.0
                 else
@@ -512,8 +504,8 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
             local flux = 0.0
             # --- Cell-Face Blocking Logic for Diffusion ---
             if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_phys, j_phys-1] + state.zeta[i_glob, j_glob-1, k]
-                depth2 = grid.h[i_phys, j_phys]   + state.zeta[i_glob, j_glob, k]
+                depth1 = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
                 if depth1 < D_crit || depth2 < D_crit
                     flux = 0.0
                 else

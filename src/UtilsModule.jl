@@ -25,15 +25,15 @@ the full dataset (slower but more accurate), set `time_samples=nothing`.
 # Arguments
 - `hydro_data`: The `HydrodynamicData` object for the simulation.
 - `advection_scheme::Symbol`: The advection scheme to be used (`:TVD`, `:UP3`, `:ImplicitADI`). Defaults to `:TVD`.
-- `pm_var`, `pn_var`: Names of the grid metric variables in the NetCDF file.
+- `dx_var`, `dy_var`: Names of the grid cell size variables in the NetCDF file (e.g., "dx", "dy").
 - `safety_factor`: For explicit schemes, the factor to reduce the calculated CFL timestep for safety (e.g., 0.8).
 - `CFL_acc`: For implicit schemes, the desired "accuracy Courant number" to base the recommendation on (e.g., 5.0).
 - `time_samples`: Number of time steps to sample for velocity checks. `nothing` scans the entire dataset.
 """
 function estimate_stable_timestep(hydro_data::HydrodynamicData; 
                                  advection_scheme::Symbol=:TVD,
-                                 pm_var="pm", 
-                                 pn_var="pn", 
+                                 dx_var::String="dx", 
+                                 dy_var::String="dy", 
                                  safety_factor=0.8,
                                  CFL_acc::Float64=5.0,
                                  time_samples::Union{Int, Nothing}=3)
@@ -48,32 +48,41 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
     
     try
         ds = NCDataset(filepath)
-        # 1. Find minimum grid spacing (fast, as pm/pn are 2D)
-        if !haskey(ds, pm_var) || !haskey(ds, pn_var); error("Grid metric variables '$pm_var' or '$pn_var' not found."); end
-        dx_min = 1 / maximum(ds[pm_var]; init=0.0)
-        dy_min = 1 / maximum(ds[pn_var]; init=0.0)
+        # 1. Find minimum grid spacing from dx and dy variables
+        if !haskey(ds, dx_var) || !haskey(ds, dy_var); error("Grid spacing variables '$dx_var' or '$dy_var' not found."); end
+        dx_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dx_var][:]))
+        dy_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dy_var][:]))
         println("Minimum grid spacing: dx ≈ $(round(dx_min, digits=2))m, dy ≈ $(round(dy_min, digits=2))m")
 
         # 2. Find maximum velocities
         if !haskey(ds, u_var) || !haskey(ds, v_var); error("Velocity variables '$u_var' or '$v_var' not found."); end
         if time_samples === nothing
             println("Scanning entire dataset for maximum velocities (this may be slow)...")
-            u_max = maximum(abs, ds[u_var]; init=0.0)
-            v_max = maximum(abs, ds[v_var]; init=0.0)
+            u_max = maximum(abs, skipmissing(ds[u_var]));
+            v_max = maximum(abs, skipmissing(ds[v_var]));
         else
             println("Sampling $time_samples time steps for maximum velocities...")
-            time_dim = ds[u_var].dim[end]
-            n_times = ds.dim[time_dim]
+            # Robustly find the time dimension and its index
+            time_dim_name = dimnames(ds[u_var])[end]
+            time_dim_idx = findfirst(d -> d == time_dim_name, dimnames(ds[u_var]))
+            if isnothing(time_dim_idx)
+                error("Could not find the time dimension for variable '$u_var'.")
+            end
+            n_times = ds.dim[time_dim_name]
             indices_to_sample = round.(Int, range(1, stop=n_times, length=time_samples))
+            
             u_max_samples = Float64[]
             v_max_samples = Float64[]
-            time_dim_idx = findfirst(d -> d == time_dim, ds[u_var].dim)
+            
             for t_idx in unique(indices_to_sample)
-                slicer = [(:) for _ in 1:length(ds[u_var].dim)]
+                # Create a slicer for positional indexing, ensuring it can hold mixed types
+                slicer = Vector{Any}(fill(Colon(), ndims(ds[u_var])))
                 slicer[time_dim_idx] = t_idx
-                u_slice = ds[u_var][slicer...]; v_slice = ds[v_var][slicer...]
-                push!(u_max_samples, maximum(abs.(u_slice); init=0.0))
-                push!(v_max_samples, maximum(abs.(v_slice); init=0.0))
+                
+                u_slice = ds[u_var][slicer...]
+                v_slice = ds[v_var][slicer...]
+                push!(u_max_samples, maximum(abs, skipmissing(u_slice)))
+                push!(v_max_samples, maximum(abs, skipmissing(v_slice)))
             end
             u_max = maximum(u_max_samples); v_max = maximum(v_max_samples)
         end

@@ -5,7 +5,7 @@ module HorizontalTransportModule
 export horizontal_transport!
 
 using ..HydrodynamicTransport.ModelStructs
-using ..HydrodynamicTransport.BoundaryConditionsModule
+using ..HydrodynamicTransport.BoundaryConditionsModule: apply_intermediate_boundary_conditions!
 using StaticArrays
 using Logging
 using LinearAlgebra
@@ -498,35 +498,6 @@ function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{
         view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= solution
     end
 end
-
-"""
-    apply_intermediate_boundary_conditions!(C_intermediate, C_final, grid, bcs, tracer_name)
-
-Applies boundary conditions to the intermediate solution `C_intermediate` from the
-x-sweep. This is a critical step for the stability and accuracy of the ADI method.
-
-For Dirichlet (or fixed value) boundary conditions, the value of the intermediate
-field at a boundary cell is set to the known physical boundary value for the final
-solution at the new time step. This prevents the unphysical intermediate variable
-from polluting the second (Y-sweep) step of the ADI solver.
-"""
-function apply_intermediate_boundary_conditions!(C_intermediate::Array{Float64, 3}, C_final::Array{Float64, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
-    ng = grid.ng
-    # We loop through the boundary conditions. If a Dirichlet condition is found
-    # for the current tracer, we enforce it on the intermediate array.
-    for bc in bcs
-        if isa(bc, DirichletBoundary) && bc.tracer_name == tracer_name
-            for (i_phys, j_phys, k_idx) in bc.indices
-                i_glob, j_glob = i_phys + ng, j_phys + ng
-                # Set the intermediate value to the final, known boundary value.
-                # C_final has already been updated by apply_boundary_conditions!
-                # in the main time stepping loop.
-                C_intermediate[i_glob, j_glob, k_idx] = C_final[i_glob, j_glob, k_idx]
-            end
-        end
-    end
-end
-
 
 """
     advect_implicit_y!(C_final, C_intermediate, state, grid, dt)

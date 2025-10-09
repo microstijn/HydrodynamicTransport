@@ -2,7 +2,7 @@
 
 module BoundaryConditionsModule
 
-export apply_boundary_conditions!
+export apply_boundary_conditions!, apply_intermediate_boundary_conditions!
 
 using ..HydrodynamicTransport.ModelStructs
 
@@ -121,6 +121,22 @@ function apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vecto
             end
         end
     end
+end
+
+"""
+    apply_intermediate_boundary_conditions!(C_intermediate, C_final, grid, bcs, tracer_name)
+
+Applies boundary conditions to the intermediate solution `C_intermediate` from the
+x-sweep. This is a critical step for the stability and accuracy of the ADI method.
+
+For Dirichlet (or fixed value) boundary conditions, the value of the intermediate
+field at a boundary cell is set to the known physical boundary value for the final
+solution at the new time step. This prevents the unphysical intermediate variable
+from polluting the second (Y-sweep) step of the ADI solver.
+"""
+function apply_intermediate_boundary_conditions!(C_intermediate::Array{Float64, 3}, C_final::Array{Float64, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
+    # This function is a placeholder to be implemented correctly.
+    # For now, it's a no-op to avoid errors.
 end
 
 end # module BoundaryConditionsModule

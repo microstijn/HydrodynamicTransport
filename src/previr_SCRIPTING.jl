@@ -16,6 +16,16 @@ ds = NCDataset(f);
 grid = initialize_curvilinear_grid(f);
 state = initialize_state(grid, ds, (:Tracer,));
 
+
+st = estimate_stable_timestep(hydro_data,
+                                 advection_scheme=:ImplicitADI,
+                                 dx_var ="dx", 
+                                 dy_var ="dy",  
+                                 safety_factor=0.8,
+                                 CFL_acc = 100.0,
+                                 time_samples = 3
+)
+
 # lets get some sources in Helper
 
 sources_to_plot = [
@@ -36,9 +46,11 @@ end
 
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 
+
+
 start_time = 0.0 # Start from the beginning of the dataset
-dt = 60*30
-end_time = 48 * 60 * 60.0 # Run for 12 hours to keep the test quick
+dt = round(st)
+end_time = 2*48 * 60 * 60.0 # Run for 12 hours to keep the test quick
 
 # --- Output Configuration ---
 # Directory where the output .jld2 files will be saved

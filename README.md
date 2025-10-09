@@ -10,6 +10,48 @@
 *   **Flexible Boundary Conditions**: Supports `OpenBoundary`, `RiverBoundary`, and `TidalBoundary` types to handle various inflow/outflow scenarios.
 *   **Utilities**: Includes helper functions to initialize grids from NetCDF files, estimate stable timesteps (CFL condition), and automatically map variables from data files.
 
+## Overview
+
+```mermaid
+graph TD
+    subgraph Initialization
+        A[User Script Calls run_simulation] --> B{Is a Restart File Provided}
+        B -- Yes --> C[Load State from Checkpoint File]
+        B -- No --> D[Use Provided Initial State]
+        C --> F[Start Main Time Loop]
+        D --> F
+    end
+
+    subgraph "Main Time Loop for each timestep"
+        F --> G[Apply Boundary Conditions]
+        G --> H[Update Hydrodynamics reads velocities and water level zeta]
+        H --> I[Horizontal Transport]
+        
+        subgraph I [Horizontal Transport]
+            direction LR
+            I1[Begin Horizontal Step] --> I2{Which Advection Scheme}
+            I2 -- TVD --> I3[Run TVD Advection]
+            I2 -- UP3 --> I4[Run UP3 Advection]
+            I3 --> I5(Check Water Depth vs D crit to Block Outflow)
+            I4 --> I5a
+            I5 --> I6[Run Horizontal Diffusion]
+            I6 --> I7(Check Water Depth vs D crit to Block Outflow)
+            I7 --> I8[End Horizontal Step]
+        end
+
+        I --> J[Vertical Transport]
+        J --> K[Apply Sources and Sinks]
+        K --> L{Is it time to save output}
+        L -- Yes --> M[Save Current State to File]
+        M --> N[End Timestep]
+        L -- No --> N
+    end
+
+    N --> O{Is Simulation Time Less Than End Time}
+    O -- Yes --> G
+    O -- No --> P[End Simulation and Return Final State]
+
+```
 ## Getting Started
 
 ### Prerequisites

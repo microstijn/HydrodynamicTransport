@@ -76,7 +76,8 @@ using HydrodynamicTransport.HorizontalTransportModule: horizontal_transport!
     D_crit = 1.0
     
     # We only need to test one transport scheme, UP3 is fine
-    horizontal_transport!(state, grid, dt, :TVD, D_crit)
+    boundary_conditions = Vector{BoundaryCondition}()
+    horizontal_transport!(state, grid, dt, :TVD, D_crit, boundary_conditions)
     
     # --- 5. Assertions ---
     # The tracer should NOT have been transported to the downstream cell
@@ -92,11 +93,73 @@ using HydrodynamicTransport.HorizontalTransportModule: horizontal_transport!
     
     # Set D_crit to 0.0, which should disable the blocking for any cell with depth > 0
     D_crit_disabled = 0.0
-    horizontal_transport!(state, grid, dt, :TVD, D_crit_disabled)
+    horizontal_transport!(state, grid, dt, :TVD, D_crit_disabled, boundary_conditions)
     
     # --- 7. Assertions for Non-Blocking Case ---
     # The tracer SHOULD now have been transported to the downstream cell
     @test C[downstream_cell_i_glob, downstream_cell_j_glob, 1] > 0.0
     
     println("Cell-face blocking test passed: Flux was correctly allowed when D_crit was disabled.")
+end
+
+@testset "Implicit ADI Mass Conservation" begin
+    # --- 1. Setup Grid and State (similar to above) ---
+    NG = 2
+    nx, ny, nz = 10, 10, 1
+    Lx, Ly = 200.0, 200.0
+    dx, dy, dz = Lx / nx, Ly / ny, 1.0
+    nx_tot, ny_tot = nx + 2*NG, ny + 2*NG
+
+    pm = ones(Float64, nx_tot, ny_tot) ./ dx
+    pn = ones(Float64, nx_tot, ny_tot) ./ dy
+    h = ones(Float64, nx_tot, ny_tot) .* 10.0
+    volume = ones(Float64, nx_tot, ny_tot, nz) .* (dx * dy * dz)
+    
+    # Dummy arrays for unused fields
+    zeros_arr = zeros(nx_tot, ny_tot)
+    trues_arr_rho = trues(nx_tot, ny_tot)
+    trues_arr_u = trues(nx_tot + 1, ny_tot)
+    trues_arr_v = trues(nx_tot, ny_tot + 1)
+    face_area_x = ones(Float64, nx_tot + 1, ny_tot, nz) .* (dy * dz)
+    face_area_y = ones(Float64, nx_tot, ny_tot + 1, nz) .* (dx * dz)
+    z_w = [-dz, 0.0]
+
+    grid = CurvilinearGrid(NG, nx, ny, nz, zeros_arr, zeros_arr, zeros_arr, zeros_arr, zeros_arr, zeros_arr, 
+                           z_w, pm, pn, zeros_arr, h,
+                           trues_arr_rho, trues_arr_u, trues_arr_v,
+                           face_area_x, face_area_y, volume)
+
+    state = initialize_state(grid, (:C,))
+    state.u .= 0.5  # Constant velocity U
+    state.v .= 0.5  # Constant velocity V
+    state.zeta .= 0.0
+
+    # --- 2. Set Initial Condition and Calculate Initial Mass ---
+    C = state.tracers[:C]
+    C_phys = view(C, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
+    C_phys[4:6, 4:6, 1] .= 100.0 # Initial patch of tracer
+
+    volume_phys = view(grid.volume, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
+    initial_mass = sum(C_phys .* volume_phys)
+    @test initial_mass > 0.0
+
+    # --- 3. Run Transport with Implicit ADI Scheme ---
+    # Use a timestep that would be unstable for an explicit scheme (Courant > 1)
+    # Courant number = u*dt/dx + v*dt/dy = 0.5*dt/20 + 0.5*dt/20 = 0.05*dt
+    # To make Courant > 1, need dt > 20. Let's use dt = 30.
+    dt = 30.0
+    D_crit = 0.0
+    boundary_conditions = Vector{BoundaryCondition}()
+
+    # Run for a few steps to allow for transport
+    for _ in 1:5
+        horizontal_transport!(state, grid, dt, :ImplicitADI, D_crit, boundary_conditions)
+    end
+
+    # --- 4. Calculate Final Mass and Assert Conservation ---
+    final_mass = sum(C_phys .* volume_phys)
+    
+    @test initial_mass ≈ final_mass rtol=1e-12
+    
+    println("Implicit ADI test passed: Simulation ran and mass was conserved.")
 end

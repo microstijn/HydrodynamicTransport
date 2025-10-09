@@ -5,20 +5,20 @@ module HorizontalTransportModule
 export horizontal_transport!
 
 using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.BoundaryConditionsModule
 using StaticArrays
+using Logging
+using LinearAlgebra
 
 
 """
-    horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol)
+    horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
 
 Computes the change in tracer concentrations due to horizontal transport processes
 (advection and diffusion) over a single time step.
 
 This function acts as the main dispatcher for horizontal transport. It uses operator
-splitting to solve the transport equation in two stages:
-1.  **Advection**: Solved first in the x-direction, then in the y-direction. The result
-    of the x-advection is stored in a buffer and used as input for the y-advection.
-2.  **Diffusion**: Solved similarly, first in x and then in y.
+splitting to solve the transport equation.
 
 The specific advection algorithm is chosen via the `scheme` argument.
 
@@ -26,32 +26,44 @@ The specific advection algorithm is chosen via the `scheme` argument.
 - `state::State`: The model state, which is modified in-place.
 - `grid::AbstractGrid`: The computational grid.
 - `dt::Float64`: The time step duration.
-- `scheme::Symbol`: The advection scheme to use. Options are `:TVD` (Total Variation
-  Diminishing) and `:UP3` (Upstream-Biased 3rd-Order).
+- `scheme::Symbol`: The advection scheme to use. Options are `:TVD`, `:UP3`, and `:ImplicitADI`.
+- `D_crit::Float64`: Critical depth for wet/dry cells.
+- `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions.
 
 # Returns
 - `nothing`: The function modifies `state.tracers` in-place.
 """
-function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64)
+function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
     Kh = 1.0 
     for tracer_name in keys(state.tracers)
-        C1 = state.tracers[tracer_name]
-        C2 = state._buffers[tracer_name] 
+        C_initial = state.tracers[tracer_name]
+        C_intermediate = state._buffers[tracer_name] # Re-using buffer
         
         # --- Advection Step ---
         if scheme == :TVD
-            advect_x_tvd!(C2, C1, state, grid, dt, state.flux_x, D_crit)
-            advect_y_tvd!(C1, C2, state, grid, dt, state.flux_y, D_crit)
+            advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
+            advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
         elseif scheme == :UP3
-            advect_x_up3!(C2, C1, state, grid, dt, state.flux_x, D_crit)
-            advect_y_up3!(C1, C2, state, grid, dt, state.flux_y, D_crit)
+            advect_x_up3!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
+            advect_y_up3!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
+        elseif scheme == :ImplicitADI
+            # Step 1: Implicit X-Sweep: (I - dt*L_x) * C_intermediate = C_initial
+            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+
+            # Step 1.5: Handle Boundary Conditions for the Intermediate Variable
+            apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
+
+            # Step 2: Implicit Y-Sweep: (I - dt*L_y) * C_final = C_intermediate
+            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt) # Result stored back in C_initial
         else
-            error("Unknown advection scheme: $scheme. Available options are :TVD and :UP3.")
+            error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
         end
         
         # --- Diffusion Step (common to all schemes) ---
-        diffuse_x!(C2, C1, state, grid, dt, Kh, state.flux_x, D_crit)
-        diffuse_y!(C1, C2, state, grid, dt, Kh, state.flux_y, D_crit)
+        # The result of advection is in C_initial (now C_final_advection)
+        # We use C_intermediate as the buffer again.
+        diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, state.flux_x, D_crit)
+        diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, state.flux_y, D_crit)
     end
     return nothing
 end
@@ -432,6 +444,144 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
 end
 
 # ==============================================================================
+# --- SCHEME 3: Implicit Advection (ADI) ---
+# ==============================================================================
+
+"""
+    advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+
+Performs the first step of the ADI sequence (implicit x-sweep).
+Solves `(I - dt*L_x) * C_intermediate = C_initial` for each row.
+"""
+function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+    nx, ny, nz = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+
+    # Pre-allocate vectors for the tridiagonal system
+    a = Vector{Float64}(undef, nx - 1) # sub-diagonal
+    b = Vector{Float64}(undef, nx)     # main diagonal
+    c = Vector{Float64}(undef, nx - 1) # super-diagonal
+    d = Vector{Float64}(undef, nx)     # RHS
+
+    @inbounds for k in 1:nz, j_phys in 1:ny
+        j_glob = j_phys + ng
+        
+        # --- 1. Construct the tridiagonal system for the current row ---
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+            
+            # Enforce zero-flux boundary conditions for the solver
+            u_left = (i_phys == 1) ? 0.0 : u[i_glob, j_glob, k]
+            u_right = (i_phys == nx) ? 0.0 : u[i_glob + 1, j_glob, k]
+
+            dx_i = get_dx_at_face(grid, i_glob, j_glob)
+            dx_ip1 = get_dx_at_face(grid, i_glob + 1, j_glob)
+            cr_left = (dt / dx_i) * u_left
+            cr_right = (dt / dx_ip1) * u_right
+            
+            alpha = max(cr_left, 0)
+            gamma = min(cr_right, 0)
+            beta = max(cr_right, 0) - min(cr_left, 0)
+
+            if i_phys > 1; a[i_phys-1] = -alpha; end
+            b[i_phys] = 1 + beta
+            if i_phys < nx; c[i_phys] = gamma; end
+            d[i_phys] = C_initial[i_glob, j_glob, k]
+        end
+
+        # --- 2. Solve the system using LinearAlgebra ---
+        A = Tridiagonal(a, b, c)
+        solution = A \ d
+        
+        # --- 3. Store the result in the intermediate buffer's physical domain ---
+        view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= solution
+    end
+end
+
+"""
+    apply_intermediate_boundary_conditions!(C_intermediate, C_final, grid, bcs, tracer_name)
+
+Applies boundary conditions to the intermediate solution `C_intermediate` from the
+x-sweep. This is a critical step for the stability and accuracy of the ADI method.
+
+For Dirichlet (or fixed value) boundary conditions, the value of the intermediate
+field at a boundary cell is set to the known physical boundary value for the final
+solution at the new time step. This prevents the unphysical intermediate variable
+from polluting the second (Y-sweep) step of the ADI solver.
+"""
+function apply_intermediate_boundary_conditions!(C_intermediate::Array{Float64, 3}, C_final::Array{Float64, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
+    ng = grid.ng
+    # We loop through the boundary conditions. If a Dirichlet condition is found
+    # for the current tracer, we enforce it on the intermediate array.
+    for bc in bcs
+        if isa(bc, DirichletBoundary) && bc.tracer_name == tracer_name
+            for (i_phys, j_phys, k_idx) in bc.indices
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                # Set the intermediate value to the final, known boundary value.
+                # C_final has already been updated by apply_boundary_conditions!
+                # in the main time stepping loop.
+                C_intermediate[i_glob, j_glob, k_idx] = C_final[i_glob, j_glob, k_idx]
+            end
+        end
+    end
+end
+
+
+"""
+    advect_implicit_y!(C_final, C_intermediate, state, grid, dt)
+
+Performs the second step of the ADI sequence (implicit y-sweep).
+Solves `(I - dt*L_y) * C_final = C_intermediate` for each column.
+"""
+function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+    nx, ny, nz = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+
+    # Pre-allocate vectors for the tridiagonal system
+    a = Vector{Float64}(undef, ny - 1) # sub-diagonal
+    b = Vector{Float64}(undef, ny)     # main-diagonal
+    c = Vector{Float64}(undef, ny - 1) # super-diagonal
+    d = Vector{Float64}(undef, ny)     # RHS
+
+    @inbounds for k in 1:nz, i_phys in 1:nx
+        i_glob = i_phys + ng
+
+        # --- 1. Construct the tridiagonal system for the current column ---
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+            
+            # Enforce zero-flux boundary conditions for the solver
+            v_bottom = (j_phys == 1) ? 0.0 : v[i_glob, j_glob, k]
+            v_top = (j_phys == ny) ? 0.0 : v[i_glob, j_glob + 1, k]
+
+            dy_j = get_dy_at_face(grid, i_glob, j_glob)
+            dy_jp1 = get_dy_at_face(grid, i_glob, j_glob + 1)
+            cr_bottom = (dt / dy_j) * v_bottom
+            cr_top = (dt / dy_jp1) * v_top
+
+            alpha = max(cr_bottom, 0)
+            gamma = min(cr_top, 0)
+            beta = max(cr_top, 0) - min(cr_bottom, 0)
+
+            if j_phys > 1; a[j_phys-1] = -alpha; end
+            b[j_phys] = 1 + beta
+            if j_phys < ny; c[j_phys] = gamma; end
+            d[j_phys] = C_intermediate[i_glob, j_glob, k]
+        end
+
+        # --- 2. Solve the system using LinearAlgebra ---
+        A = Tridiagonal(a, b, c)
+        solution = A \ d
+
+        # --- 3. Store the result back into the final tracer array's physical domain ---
+        view(C_final, i_glob, (ng+1):(ny+ng), k) .= solution
+    end
+end
+
+
+# ==============================================================================
 # --- Diffusion and Helper Functions ---
 # ==============================================================================
 
@@ -460,30 +610,30 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     ng = grid.ng
     fluxes_x .= 0.0
     
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny, i_phys in 1:nx+1
+    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
+    @inbounds for k in axes(C_in, 3), j_phys in 1:ny, i_phys in 2:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
-        if i_phys > 1
-            local flux = 0.0
-            # --- Cell-Face Blocking Logic for Diffusion ---
-            if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
-                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
-                if depth1 < D_crit || depth2 < D_crit
-                    flux = 0.0
-                else
-                    dx = get_dx_centers(grid, i_glob, j_glob)
-                    dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
-                    flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
-                end
-            else # Original logic for CartesianGrid or when not using blocking
+        
+        local flux = 0.0
+        # --- Cell-Face Blocking Logic for Diffusion ---
+        if isa(grid, CurvilinearGrid)
+            depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+            depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
+            if depth1 < D_crit || depth2 < D_crit
+                flux = 0.0
+            else
                 dx = get_dx_centers(grid, i_glob, j_glob)
                 dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
                 flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
             end
-
-            face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
-            fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
+        else # Original logic for CartesianGrid or when not using blocking
+            dx = get_dx_centers(grid, i_glob, j_glob)
+            dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
+            flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
         end
+
+        face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
+        fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
     end
 
     @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
@@ -498,30 +648,30 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     ng = grid.ng
     fluxes_y .= 0.0
     
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny+1, i_phys in 1:nx
+    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
+    @inbounds for k in axes(C_in, 3), j_phys in 2:ny, i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
-        if j_phys > 1
-            local flux = 0.0
-            # --- Cell-Face Blocking Logic for Diffusion ---
-            if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
-                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
-                if depth1 < D_crit || depth2 < D_crit
-                    flux = 0.0
-                else
-                    dy = get_dy_centers(grid, i_glob, j_glob)
-                    dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
-                    flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
-                end
-            else # Original logic for CartesianGrid or when not using blocking
+        
+        local flux = 0.0
+        # --- Cell-Face Blocking Logic for Diffusion ---
+        if isa(grid, CurvilinearGrid)
+            depth1 = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+            depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
+            if depth1 < D_crit || depth2 < D_crit
+                flux = 0.0
+            else
                 dy = get_dy_centers(grid, i_glob, j_glob)
                 dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
                 flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
             end
-
-            face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_v[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob, j_glob-1, k])
-            fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
+        else # Original logic for CartesianGrid or when not using blocking
+            dy = get_dy_centers(grid, i_glob, j_glob)
+            dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
+            flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
         end
+
+        face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_v[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob, j_glob-1, k])
+        fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
     end
 
     @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx

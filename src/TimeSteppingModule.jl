@@ -34,7 +34,8 @@ hydrodynamic data is not read from a file.
 
 # Keyword Arguments
 - `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
-- `advection_scheme::Symbol`: The advection scheme to use (`:TVD` or `:UP3`). Defaults to `:TVD`.
+- `advection_scheme::Symbol`: The advection scheme to use (`:TVD`, `:UP3`, or `:ImplicitADI`). Defaults to `:TVD`.
+  `:ImplicitADI` is an unconditionally stable implicit method suitable for large time steps.
 - `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
   depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
   cell face are blocked. Defaults to `0.0`.
@@ -80,7 +81,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt, D_crit)
 
@@ -109,7 +110,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
-        horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt, D_crit)
         
@@ -144,7 +145,8 @@ hydrodynamic data (like velocity fields and sea surface height) is read from a f
 
 # Keyword Arguments
 - `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
-- `advection_scheme::Symbol`: The advection scheme to use (`:TVD` or `:UP3`). Defaults to `:TVD`.
+- `advection_scheme::Symbol`: The advection scheme to use (`:TVD`, `:UP3`, or `:ImplicitADI`). Defaults to `:TVD`.
+  `:ImplicitADI` is an unconditionally stable implicit method suitable for large time steps.
 - `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
   depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
   cell face are blocked. Defaults to `0.0`.
@@ -190,7 +192,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt, D_crit)
 
@@ -219,7 +221,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
-        horizontal_transport!(state, grid, dt, advection_scheme, D_crit)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         source_sink_terms!(state, grid, sources, time, dt, D_crit)
 

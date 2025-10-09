@@ -34,8 +34,9 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     salinity = zeros(Float64, nx_tot, ny_tot, nz)
     tss = zeros(Float64, nx_tot, ny_tot, nz)
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
+    zeta = zeros(Float64, nx_tot, ny_tot, nz)
 
-    return State(tracers, buffers, u, v, w, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N)
@@ -65,8 +66,9 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
@@ -95,8 +97,9 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
     salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 end # module StateModule

@@ -38,6 +38,7 @@ mutable struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
     _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary tracer calculations
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
+    zeta::Array{Float64, 3}
     flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
     flux_y::Array{Float64, 3} # Pre-allocated buffer for y-direction fluxes
     flux_z::Array{Float64, 3} # Pre-allocated buffer for z-direction fluxes
@@ -50,6 +51,7 @@ end
     i::Int; j::Int; k::Int # Physical indices (1-based from the corner of the physical domain)
     tracer_name::Symbol
     influx_rate::Function # time -> value
+    relocate_if_dry::Bool = false
 end
 
 abstract type BoundaryCondition end

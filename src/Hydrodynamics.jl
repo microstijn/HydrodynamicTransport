@@ -34,11 +34,12 @@ function update_hydrodynamics_placeholder!(state::State, grid::CartesianGrid, ti
         state.v[i_glob, j_glob, k] = omega * rx
     end
     state.w .= 0.0
+    state.zeta .= 0.0
 end
 
 function update_hydrodynamics_placeholder!(state::State, grid::CurvilinearGrid, time::Float64)
     @warn "Placeholder hydrodynamics for CurvilinearGrid is not implemented. Setting velocities to zero."
-    state.u .= 0.0; state.v .= 0.0; state.w .= 0.0
+    state.u .= 0.0; state.v .= 0.0; state.w .= 0.0; state.zeta .= 0.0
 end
 
 
@@ -56,21 +57,47 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
     fields_to_load = [
         (state.u, :u, "ni_u", "nj_u", "level"),
         (state.v, :v, "ni_v", "nj_v", "level"),
-        # (state.w, :w, ...), # W is not available in 3D in this file
         (state.temperature, :temp, "ni", "nj", "level"),
         (state.salinity, :salt, "ni", "nj", "level"),
+        (state.zeta, :zeta, "ni", "nj", nothing), # Special case for 2D field
     ]
 
     for (state_field, standard_name, x_dim, y_dim, z_dim) in fields_to_load
         if haskey(hydro_data.var_map, standard_name)
             nc_var_name = hydro_data.var_map[standard_name]
             if haskey(ds, nc_var_name)
-                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]; nz_phys = ds.dim[z_dim]
-                interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
-                data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
-                if weight > 1e-9; data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0); interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
-                else; interior_view .= data_slice1; end
-            else; @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."; end
+                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]
+                
+                if z_dim !== nothing # Handle 3D fields (u, v, temp, salt)
+                    nz_phys = ds.dim[z_dim]
+                    interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
+                    data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
+                    if weight > 1e-9
+                        data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0)
+                        interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
+                    else
+                        interior_view .= data_slice1
+                    end
+                else # Handle 2D fields (zeta)
+                    interior_view_3d = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, :)
+                    data_slice1_2d = coalesce.(ds[nc_var_name][:, :, idx1], 0.0)
+                    
+                    local interpolated_data_2d
+                    if weight > 1e-9
+                        data_slice2_2d = coalesce.(ds[nc_var_name][:, :, idx2], 0.0)
+                        interpolated_data_2d = (1.0 - weight) .* data_slice1_2d .+ weight .* data_slice2_2d
+                    else
+                        interpolated_data_2d = data_slice1_2d
+                    end
+                    
+                    # Broadcast the 2D data across the 3D state array's vertical dimension
+                    for k in 1:size(interior_view_3d, 3)
+                        view(interior_view_3d, :, :, k) .= interpolated_data_2d
+                    end
+                end
+            else
+                @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."
+            end
         end
     end
     return nothing

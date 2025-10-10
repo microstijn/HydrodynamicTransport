@@ -3,7 +3,7 @@
 module ModelStructs
 
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
-       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction
 
 using StaticArrays
 using Base: @kwdef
@@ -52,6 +52,11 @@ end
     tracer_name::Symbol
     influx_rate::Function # time -> value
     relocate_if_dry::Bool = false
+end
+
+@kwdef struct FunctionalInteraction
+    affected_tracers::Vector{Symbol}
+    interaction_function::Function
 end
 
 abstract type BoundaryCondition end

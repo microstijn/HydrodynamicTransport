@@ -39,7 +39,7 @@ using .UtilsModule
 # Export the public API 
 # Types from ModelStructs.jl
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
-       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction
        
 # Functions from GridModule.jl
 export initialize_cartesian_grid, initialize_curvilinear_grid

@@ -48,6 +48,7 @@ hydrodynamic data is not read from a file.
 """
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -83,7 +84,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt, D_crit)
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -98,6 +99,7 @@ end
 # This function remains for in-memory storage, useful for small tests
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
@@ -112,7 +114,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt, D_crit)
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
         
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))
@@ -159,6 +161,7 @@ hydrodynamic data (like velocity fields and sea surface height) is read from a f
 """
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -194,7 +197,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt, D_crit)
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -209,6 +212,7 @@ end
 # This function remains for in-memory storage
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
@@ -223,7 +227,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
-        source_sink_terms!(state, grid, sources, time, dt, D_crit)
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))

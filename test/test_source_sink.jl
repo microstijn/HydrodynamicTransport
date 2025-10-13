@@ -149,26 +149,71 @@ grid = CurvilinearGrid(NG, nx, ny, nz, zeros_arr, zeros_arr, zeros_arr, zeros_ar
                        face_area_x, face_area_y, volume)
 state = initialize_state(grid, (:Tracer1, :Tracer2))
 
-state
+tss_phys_view = view(state.tss, NG+1:nx+NG, NG+1:ny+NG, :)
+tss_phys_view .= 5.0  # mg/L or appropriate units
 
-C = state.tracers[:Tracer1]
-C_phys = view(C, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
-C_phys[4:6, 4:6, 1] .= 100.0 # Initial patch of tracer
+# Example: Set a uniform UVB value of 1.2 across the physical domain
+uvb_phys_view = view(state.uvb, NG+1:nx+NG, NG+1:ny+NG, :)
+uvb_phys_view .= 1.2 # W/m^2 or appropriate units
 
-C3 = state.tracers[:Tracer2]
-C3_phys = view(C, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
-C3_phys[4:6, 4:6, 1] .= 0.2 # Initial patch of tracer
+C1 = state.tracers[:Tracer1]
+C1_phys = view(C1, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
+C1_phys[4:6, 4:6, 1] .= 100.0 # Initial patch of dissolved virus
+
+C2 = state.tracers[:Tracer2]
+C2_phys = view(C2, (NG+1):(nx+NG), (NG+1):(ny+NG), 1:nz)
+C2_phys[4:6, 4:6, 1] .= 50 # Initial patch of sorbed virus
 
 
-decay_interaction = FunctionalInteraction(
+k_total = 0.1  # Total decay rate for dissolved virus (1/day)
+k_sorbed = 0.05 # Decay rate for sorbed virus (1/day)
+k_ads = 0.001  # Adsorption rate (L/mg/day)
+k_des = 0.2    # Desorption rate (1/day)
+v_settle = 0.5 # Settling velocity (m/day)
+# Convert rates from per-day to per-second for the simulation
+SECONDS_PER_DAY = 86400.0
+
+# 3. --- Define the Interaction Function ---
+function virus_dynamics(concentrations::Dict, environment, dt::Float64)
+    # Extract current concentrations for readability
+    C_dissolved = concentrations[:Tracer1]
+    C_sorbed = concentrations[:Tracer2]
+    
+    # Extract environmental parameters
+    # The `environment` object provides access to fields like TSS, depth, etc.
+    TSS = environment.TSS
+    H = environment.depth # Water depth (H)
+
+    # --- Change in Dissolved Virus (Tracer1) ---
+    # dC_dissolved/dt = -k_total*C_dissolved - k_ads*C_dissolved*TSS + k_des*C_sorbed
+    change_dissolved = (
+        - (k_total / SECONDS_PER_DAY) * C_dissolved
+        - (k_ads / SECONDS_PER_DAY) * C_dissolved * TSS
+        + (k_des / SECONDS_PER_DAY) * C_sorbed
+    ) * dt
+
+    # --- Change in Sorbed Virus (Tracer2) ---
+    # dC_sorbed/dt = -k_sorbed*C_sorbed + k_ads*C_dissolved*TSS - k_des*C_sorbed - (v_settle/H)*C_sorbed
+    # Ensure depth H is not zero to prevent division errors
+    settling_term = (H > 1e-6) ? (v_settle / SECONDS_PER_DAY / H) * C_sorbed : 0.0
+    
+    change_sorbed = (
+        - (k_sorbed / SECONDS_PER_DAY) * C_sorbed
+        + (k_ads / SECONDS_PER_DAY) * C_dissolved * TSS
+        - (k_des / SECONDS_PER_DAY) * C_sorbed
+        - settling_term
+    ) * dt
+
+    # Return a dictionary with the calculated changes
+    return Dict(:Tracer1 => change_dissolved, :Tracer2 => change_sorbed)
+end
+
+virus_interaction = FunctionalInteraction(
     affected_tracers = [:Tracer1, :Tracer2],
-    interaction_function = (C, env, dt) -> Dict(:Tracer1 => C[:Tracer1] * C[:Tracer1] * dt)
+    interaction_function = virus_dynamics
 )
 
-decay_interaction2 = FunctionalInteraction(
-    affected_tracers = [:Tracer1, :Tracer2],
-    interaction_function = (C, env, dt) -> Dict(:Tracer2 => C[:Tracer2] * C[:Tracer1] * dt)
-)
+
 final_state = run_simulation(
     grid,
     state,
@@ -176,7 +221,8 @@ final_state = run_simulation(
     0.0, # start_time
     1.0, # end_time
     1.0; # dt
-    functional_interactions = [decay_interaction]
+    functional_interactions = [virus_interaction]
 )
 
 final_concentration = final_state.tracers[:Tracer1][:, :, :]
+final_concentration = final_state.tracers[:Tracer2][:, :, :]

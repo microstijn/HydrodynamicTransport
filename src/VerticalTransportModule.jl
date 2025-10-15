@@ -123,7 +123,8 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64, sedi
         C_buffer = state._buffers[tracer_name]
         is_sediment = haskey(sediment_tracers, tracer_name)
         
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+        @inbounds Base.Threads.@threads for j_phys in 1:ny
+          for i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
             C_col_in = view(C_final, i_glob, j_glob, :)
@@ -152,14 +153,17 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64, sedi
                 bed_mass_array = state.bed_mass[tracer_name]
                 _apply_sedimentation!(C_col_out, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g)
             end
+          end
         end
 
         # Diffusion step for the entire tracer field
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+        @inbounds Base.Threads.@threads for j_phys in 1:ny
+          for i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
             C_col_in = C_buffer[i_glob, j_glob, :]
             C_col_out = view(C_final, i_glob, j_glob, :)
             solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+          end
         end
     end
     return nothing

@@ -89,7 +89,8 @@ function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     u = state.u
     fluxes_x .= 0.0 # Clear the buffer
 
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_in, 3)
         j_glob = j_phys + ng
         # --- Interior Faces (3rd-Order Upstream) ---
         for i_phys in 2:nx
@@ -137,9 +138,11 @@ function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             C_face = (vel >= 0) ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]
             fluxes_x[i_glob, j_glob, k] = vel * C_face * grid.face_area_x[i_glob, j_glob, k]
         end
+      end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
         if grid.volume[i_glob, j_glob, k] > 0
@@ -147,6 +150,7 @@ function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
         else
              C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k]
         end
+      end
     end
 end
 
@@ -156,7 +160,8 @@ function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     v = state.v
     fluxes_y .= 0.0 # Clear the buffer
 
-    @inbounds for k in axes(C_in, 3), i_phys in 1:nx
+    @inbounds Base.Threads.@threads for i_phys in 1:nx
+      for k in axes(C_in, 3)
         i_glob = i_phys + ng
         # --- Interior Faces (3rd-Order Upstream) ---
         for j_phys in 2:ny
@@ -204,9 +209,11 @@ function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             C_face = (vel >= 0) ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]
             fluxes_y[i_glob, j_glob, k] = vel * C_face * grid.face_area_y[i_glob, j_glob, k]
         end
+      end
     end
     
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
         if grid.volume[i_glob, j_glob, k] > 0
@@ -214,6 +221,7 @@ function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
         else
             C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k]
         end
+      end
     end
 end
 
@@ -299,7 +307,8 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     u = state.u
     fluxes_x .= 0.0
 
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_in, 3)
         j_glob = j_phys + ng
         # --- Interior Faces ---
         for i_phys in 3:nx-1
@@ -359,12 +368,15 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             end
             fluxes_x[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]) * grid.face_area_x[i_glob, j_glob, k]
         end
+      end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
         C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+      end
     end
 end
 
@@ -374,7 +386,8 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     v = state.v
     fluxes_y .= 0.0
 
-    @inbounds for k in axes(C_in, 3), i_phys in 1:nx
+    @inbounds Base.Threads.@threads for i_phys in 1:nx
+      for k in axes(C_in, 3)
         i_glob = i_phys + ng
         # --- Interior Faces ---
         for j_phys in 3:ny-1
@@ -434,12 +447,15 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
             end
             fluxes_y[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]) * grid.face_area_y[i_glob, j_glob, k]
         end
+      end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
         C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+      end
     end
 end
 
@@ -464,7 +480,8 @@ function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{
     c = Vector{Float64}(undef, nx - 1) # super-diagonal
     d = Vector{Float64}(undef, nx)     # RHS
 
-    @inbounds for k in 1:nz, j_phys in 1:ny
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in 1:nz
         j_glob = j_phys + ng
         
         # --- 1. Construct the tridiagonal system for the current row ---
@@ -496,6 +513,7 @@ function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{
         
         # --- 3. Store the result in the intermediate buffer's physical domain ---
         view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= solution
+      end
     end
 end
 
@@ -516,7 +534,8 @@ function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Fl
     c = Vector{Float64}(undef, ny - 1) # super-diagonal
     d = Vector{Float64}(undef, ny)     # RHS
 
-    @inbounds for k in 1:nz, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for i_phys in 1:nx
+      for k in 1:nz
         i_glob = i_phys + ng
 
         # --- 1. Construct the tridiagonal system for the current column ---
@@ -548,6 +567,7 @@ function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Fl
 
         # --- 3. Store the result back into the final tracer array's physical domain ---
         view(C_final, i_glob, (ng+1):(ny+ng), k) .= solution
+      end
     end
 end
 
@@ -582,7 +602,8 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     fluxes_x .= 0.0
     
     # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny, i_phys in 2:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_in, 3), i_phys in 2:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         
         local flux = 0.0
@@ -605,12 +626,15 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
 
         face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
         fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
+      end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
         C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+      end
     end
 end
 
@@ -620,7 +644,8 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     fluxes_y .= 0.0
     
     # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
-    @inbounds for k in axes(C_in, 3), j_phys in 2:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for i_phys in 1:nx
+      for k in axes(C_in, 3), j_phys in 2:ny
         i_glob, j_glob = i_phys + ng, j_phys + ng
         
         local flux = 0.0
@@ -643,12 +668,15 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
 
         face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_v[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob, j_glob-1, k])
         fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
+      end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+    @inbounds Base.Threads.@threads for j_phys in 1:ny
+      for k in axes(C_out, 3), i_phys in 1:nx
         i_glob, j_glob = i_phys + ng, j_phys + ng
         flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
         C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+      end
     end
 end
 

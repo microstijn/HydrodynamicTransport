@@ -70,13 +70,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
     state = deepcopy(state_to_run)
 
-    # Initialize bed mass arrays for specified sediment tracers
-    for tracer_name in keys(sediment_tracers)
-        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
-            nx, ny, _ = size(state.tracers[tracer_name])
-            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
-        end
-    end
 
     time_range = effective_start_time:dt:end_time
     
@@ -120,12 +113,6 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
 
-    for tracer_name in keys(sediment_tracers)
-        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
-            nx, ny, _ = size(state.tracers[tracer_name])
-            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
-        end
-    end
 
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -212,14 +199,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
     state = deepcopy(state_to_run)
 
-    # Initialize bed mass arrays for specified sediment tracers
-    for tracer_name in keys(sediment_tracers)
-        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
-            nx, ny, _ = size(state.tracers[tracer_name])
-            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
-        end
-    end
-
     time_range = effective_start_time:dt:end_time
     
     # --- Setup for file-based output ---
@@ -262,12 +241,6 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
 
-    for tracer_name in keys(sediment_tracers)
-        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
-            nx, ny, _ = size(state.tracers[tracer_name])
-            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
-        end
-    end
 
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
@@ -297,4 +270,3 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 end
 
 end # module TimeSteppingModule
-

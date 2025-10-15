@@ -21,11 +21,12 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+
     u = zeros(Float64, nx_tot + 1, ny_tot, nz)
     v = zeros(Float64, nx_tot, ny_tot + 1, nz)
     w = zeros(Float64, nx_tot, ny_tot, nz + 1)
 
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -36,7 +37,7 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
     zeta = zeros(Float64, nx_tot, ny_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N)
@@ -53,11 +54,12 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+
     u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
     
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -68,7 +70,7 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
@@ -84,11 +86,12 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+
     u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
 
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -99,7 +102,7 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 end # module StateModule

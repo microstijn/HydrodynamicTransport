@@ -49,6 +49,7 @@ hydrodynamic data is not read from a file.
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                        sediment_tracers::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -68,6 +69,15 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     end
 
     state = deepcopy(state_to_run)
+
+    # Initialize bed mass arrays for specified sediment tracers
+    for tracer_name in keys(sediment_tracers)
+        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
+            nx, ny, _ = size(state.tracers[tracer_name])
+            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
+        end
+    end
+
     time_range = effective_start_time:dt:end_time
     
     # --- Setup for file-based output ---
@@ -83,8 +93,13 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt)
+        vertical_transport!(state, grid, dt, sediment_tracers)
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        # Enforce positivity for all tracers as a safeguard
+        for C in values(state.tracers)
+            C .= max.(0.0, C)
+        end
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -100,9 +115,18 @@ end
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                                  sediment_tracers::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
+
+    for tracer_name in keys(sediment_tracers)
+        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
+            nx, ny, _ = size(state.tracers[tracer_name])
+            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
+        end
+    end
+
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
     last_output_time = start_time
@@ -113,8 +137,13 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt)
+        vertical_transport!(state, grid, dt, sediment_tracers)
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        # Enforce positivity for all tracers as a safeguard
+        for C in values(state.tracers)
+            C .= max.(0.0, C)
+        end
         
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))
@@ -162,6 +191,7 @@ hydrodynamic data (like velocity fields and sea surface height) is read from a f
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                        sediment_tracers::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -181,6 +211,15 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     end
 
     state = deepcopy(state_to_run)
+
+    # Initialize bed mass arrays for specified sediment tracers
+    for tracer_name in keys(sediment_tracers)
+        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
+            nx, ny, _ = size(state.tracers[tracer_name])
+            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
+        end
+    end
+
     time_range = effective_start_time:dt:end_time
     
     # --- Setup for file-based output ---
@@ -196,8 +235,13 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt)
+        vertical_transport!(state, grid, dt, sediment_tracers)
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        # Enforce positivity for all tracers as a safeguard
+        for C in values(state.tracers)
+            C .= max.(0.0, C)
+        end
 
         # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
@@ -213,9 +257,18 @@ end
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                                  sediment_tracers::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
+
+    for tracer_name in keys(sediment_tracers)
+        if haskey(state.tracers, tracer_name) && !haskey(state.bed_mass, tracer_name)
+            nx, ny, _ = size(state.tracers[tracer_name])
+            state.bed_mass[tracer_name] = zeros(Float64, nx, ny)
+        end
+    end
+
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
     last_output_time = start_time
@@ -226,8 +279,13 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt)
+        vertical_transport!(state, grid, dt, sediment_tracers)
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        # Enforce positivity for all tracers as a safeguard
+        for C in values(state.tracers)
+            C .= max.(0.0, C)
+        end
 
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))

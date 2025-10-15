@@ -47,7 +47,7 @@ simple_decay_func(C, env, dt) = Dict(:Tracer1 => -decay_rate * C[:Tracer1]) # No
 
 interaction = FunctionalInteraction(
     affected_tracers = [:Tracer1],
-    interaction_function = (C, env, dt) -> Dict(:Tracer1 => -decay_rate * C[:Tracer1] * dt)
+    interaction_function = (C, env, dt) -> Dict(:Tracer1 => C[:Tracer1] + (1 * dt))
 )
 # 3. Call the function to be tested
 dt = 1.0

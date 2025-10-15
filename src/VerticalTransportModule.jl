@@ -22,13 +22,13 @@ function solve_implicit_diffusion_column!(
     alpha = 0.5 * Kz * dt ./ (dz .* dz)
     
     lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
-    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
-    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
+    main_A[1] = 1.0 + alpha[1]; upper_A[1] = -alpha[1]
+    main_A[end] = 1.0 + alpha[end]; lower_A[end] = -alpha[end]
     A = Tridiagonal(lower_A, main_A, upper_A)
     
     lower_B = alpha[2:end]; main_B  = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
-    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
-    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
+    main_B[1] = 1.0 - alpha[1]; upper_B[1] = alpha[1]
+    main_B[end] = 1.0 - alpha[end]; lower_B[end] = alpha[end]
     B = Tridiagonal(lower_B, main_B, upper_B)
     
     rhs = B * C_in_col
@@ -50,17 +50,64 @@ function solve_implicit_diffusion_column!(
     alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
     
     lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
-    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
-    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
+    main_A[1] = 1.0 + alpha[1]; upper_A[1] = -alpha[1]
+    main_A[end] = 1.0 + alpha[end]; lower_A[end] = -alpha[end]
     A = Tridiagonal(lower_A, main_A, upper_A)
     
     lower_B = alpha[2:end]; main_B  = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
-    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
-    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
+    main_B[1] = 1.0 - alpha[1]; upper_B[1] = alpha[1]
+    main_B[end] = 1.0 - alpha[end]; lower_B[end] = alpha[end]
     B = Tridiagonal(lower_B, main_B, upper_B)
     
     rhs = B * C_in_col
     C_out_col .= A \ rhs
+end
+
+
+function _apply_sedimentation!(
+    C_col_out::AbstractVector,
+    bed_mass_array::AbstractMatrix,
+    grid::AbstractGrid,
+    state::State,
+    params::SedimentParams,
+    i_glob::Int, j_glob::Int,
+    dt::Float64,
+    g::Float64
+)
+    C_b_after_advection = max(0.0, C_col_out[1])
+
+    bottom_face_area = isa(grid, CartesianGrid) ? grid.face_area_z[i_glob, j_glob, 1] : 1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+    
+    # Return early if the bottom cell is dry to avoid division by zero
+    if bottom_face_area <= 0.0 || grid.volume[i_glob, j_glob, 1] <= 0.0; return; end
+    dz_bottom = grid.volume[i_glob, j_glob, 1] / bottom_face_area
+
+    u_bottom = 0.5 * (state.u[i_glob, j_glob, 1] + state.u[i_glob+1, j_glob, 1])
+    v_bottom = 0.5 * (state.v[i_glob, j_glob, 1] + state.v[i_glob, j_glob+1, 1])
+    Cd = g * params.manning_n^2 / (dz_bottom^(1/3))
+    tau_b = params.rho_fluid * Cd * (u_bottom^2 + v_bottom^2)
+    
+    Cv = C_b_after_advection / params.rho_particle
+    ws_effective = params.ws0 * (1.0 - min(1.0, Cv))^params.n_exponent
+    
+    # Deposition flux
+    Fd = (tau_b < params.tau_d) ? ws_effective * C_b_after_advection * (1 - tau_b / params.tau_d) : 0.0
+    # Resuspension flux
+    Fr = (tau_b > params.tau_cr && bed_mass_array[i_glob, j_glob] > 0.0) ? params.M * (tau_b / params.tau_cr - 1) : 0.0
+    
+    # Mass conservation cap: cannot deposit more mass than is in the water column
+    Fd = min(Fd, (C_b_after_advection * dz_bottom) / dt)
+    # Mass conservation cap: cannot resuspend more mass than is in the bed
+    Fr = min(Fr, bed_mass_array[i_glob, j_glob] / (bottom_face_area * dt))
+    
+    # Net flux TO the bed (deposition - resuspension)
+    F_net_bed = Fd - Fr
+    
+    # Update bed mass (mass = flux * area * time)
+    bed_mass_array[i_glob, j_glob] += F_net_bed * bottom_face_area * dt
+    
+    # Update concentration in bottom water cell (dC = d(mass)/volume = (flux * area * time) / (area * dz))
+    C_col_out[1] -= (F_net_bed * dt) / dz_bottom
 end
 
 
@@ -102,30 +149,8 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64, sedi
             # If it's a sediment tracer, apply bed flux to the post-advection concentration
             if is_sediment
                 params = sediment_tracers[tracer_name]
-                C_b_after_advection = max(0.0, C_col_out[1])
                 bed_mass_array = state.bed_mass[tracer_name]
-                
-                bottom_face_area = isa(grid, CartesianGrid) ? grid.face_area_z[i_glob, j_glob, 1] : 1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
-                dz_bottom = grid.volume[i_glob, j_glob, 1] / bottom_face_area
-                
-                u_bottom = 0.5 * (state.u[i_glob, j_glob, 1] + state.u[i_glob+1, j_glob, 1])
-                v_bottom = 0.5 * (state.v[i_glob, j_glob, 1] + state.v[i_glob, j_glob+1, 1])
-                Cd = g * params.manning_n^2 / (dz_bottom^(1/3))
-                tau_b = params.rho_fluid * Cd * (u_bottom^2 + v_bottom^2)
-                
-                Cv = C_b_after_advection / params.rho_particle
-                ws_effective = params.ws0 * (1.0 - min(1.0, Cv))^params.n_exponent
-                
-                Fd = (tau_b < params.tau_d) ? ws_effective * C_b_after_advection * (1 - tau_b / params.tau_d) : 0.0
-                Fr = (tau_b > params.tau_cr && bed_mass_array[i_glob, j_glob] > 0.0) ? params.M * (tau_b / params.tau_cr - 1) : 0.0
-                
-                Fd = min(Fd, (C_b_after_advection * dz_bottom) / dt)
-                Fr = min(Fr, bed_mass_array[i_glob, j_glob] / dt)
-                
-                F_net_bed = Fd - Fr
-                bed_mass_array[i_glob, j_glob] += F_net_bed * dt
-                
-                C_col_out[1] -= (F_net_bed * dt) / dz_bottom
+                _apply_sedimentation!(C_col_out, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g)
             end
         end
 

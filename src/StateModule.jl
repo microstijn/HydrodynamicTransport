@@ -7,7 +7,7 @@ export initialize_state
 using ..HydrodynamicTransport.ModelStructs 
 using NCDatasets
 
-function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} where N)
+function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
     ng = grid.ng
     nx, ny, nz = grid.dims
     
@@ -21,11 +21,21 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    # --- MODIFIED SECTION START ---
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        if name in tracer_names
+            bed_mass[name] = zeros(Float64, nx_tot, ny_tot)
+        else
+            @warn "Sediment tracer '$name' not found in the primary tracer list. No bed_mass array created for it."
+        end
+    end
+    # --- MODIFIED SECTION END ---
+
     u = zeros(Float64, nx_tot + 1, ny_tot, nz)
     v = zeros(Float64, nx_tot, ny_tot + 1, nz)
     w = zeros(Float64, nx_tot, ny_tot, nz + 1)
 
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -36,10 +46,10 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
     zeta = zeros(Float64, nx_tot, ny_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
-function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N)
+function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
     ng = grid.ng
     nx, ny, nz = grid.nx, grid.ny, grid.nz
     
@@ -53,11 +63,21 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    # --- MODIFIED SECTION START ---
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        if name in tracer_names
+            bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
+        else
+            @warn "Sediment tracer '$name' not found in the primary tracer list. No bed_mass array created for it."
+        end
+    end
+    # --- MODIFIED SECTION END ---
+
     u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
     
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -68,10 +88,10 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
-function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N)
+function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
     ng = grid.ng
     nx, ny, nz = grid.nx, grid.ny, grid.nz
 
@@ -84,11 +104,19 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
         buffers[name] = zeros(size(tracer_arr))
     end
     
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        if name in tracer_names
+            bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
+        else
+            @warn "Sediment tracer '$name' not found in the primary tracer list. No bed_mass array created for it."
+        end
+    end
+
     u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
     v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
     w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
 
-    # Pre-allocate flux buffers
     flux_x = zeros(size(u))
     flux_y = zeros(size(v))
     flux_z = zeros(size(w))
@@ -99,7 +127,7 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
+    return State(tracers, buffers, bed_mass, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0)
 end
 
 end # module StateModule

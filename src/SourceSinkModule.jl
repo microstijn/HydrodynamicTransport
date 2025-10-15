@@ -100,49 +100,51 @@ function source_sink_terms!(state::State, grid::AbstractGrid, sources::Vector{Po
     if !isempty(functional_interactions)
         nx_p, ny_p, nz_p = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
         
-        # Pre-allocate dictionary and NamedTuple to avoid allocations in the hot loop
-        concentrations = Dict{Symbol, Float64}()
-        
-        for k in 1:nz_p, j in 1:ny_p, i in 1:nx_p
-            i_glob, j_glob, k_glob = i + ng, j + ng, k
+        Base.Threads.@threads for k in 1:nz_p
+            # Each thread gets its own dictionary to avoid race conditions
+            concentrations = Dict{Symbol, Float64}()
 
-            mask_to_use = isa(grid, CurvilinearGrid) ? grid.mask_rho[i_glob, j_glob] : grid.mask[i_glob, j_glob, k_glob]
-            if !mask_to_use
-                continue
-            end
+            for j in 1:ny_p, i in 1:nx_p
+                i_glob, j_glob, k_glob = i + ng, j + ng, k
 
-            # Gather environmental conditions for this cell
-            depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
-            environment = (
-                T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
-                S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,
-                TSS = isdefined(state, :tss) ? state.tss[i_glob, j_glob, k_glob] : NaN,
-                UVB = isdefined(state, :uvb) ? state.uvb[i_glob, j_glob, k_glob] : NaN,
-                depth = depth
-            )
-
-            for interaction in functional_interactions
-                # Populate the concentrations dictionary for the function
-                empty!(concentrations)
-                all_tracers_exist = true
-                for tracer_name in interaction.affected_tracers
-                    if haskey(state.tracers, tracer_name)
-                        concentrations[tracer_name] = state.tracers[tracer_name][i_glob, j_glob, k_glob]
-                    else
-                        all_tracers_exist = false
-                        @warn "Tracer $(tracer_name) required by an interaction function not found in state. Skipping interaction."
-                        break
-                    end
+                mask_to_use = isa(grid, CurvilinearGrid) ? grid.mask_rho[i_glob, j_glob] : grid.mask[i_glob, j_glob, k_glob]
+                if !mask_to_use
+                    continue
                 end
-                if !all_tracers_exist; continue; end
 
-                # Call the user-defined function
-                dC = interaction.interaction_function(concentrations, environment, dt)
+                # Gather environmental conditions for this cell
+                depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
+                environment = (
+                    T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
+                    S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,
+                    TSS = isdefined(state, :tss) ? state.tss[i_glob, j_glob, k_glob] : NaN,
+                    UVB = isdefined(state, :uvb) ? state.uvb[i_glob, j_glob, k_glob] : NaN,
+                    depth = depth
+                )
 
-                # Apply the calculated changes
-                for (tracer_name, change) in dC
-                    if haskey(state.tracers, tracer_name)
-                        state.tracers[tracer_name][i_glob, j_glob, k_glob] += change
+                for interaction in functional_interactions
+                    # Populate the concentrations dictionary for the function
+                    empty!(concentrations)
+                    all_tracers_exist = true
+                    for tracer_name in interaction.affected_tracers
+                        if haskey(state.tracers, tracer_name)
+                            concentrations[tracer_name] = state.tracers[tracer_name][i_glob, j_glob, k_glob]
+                        else
+                            all_tracers_exist = false
+                            @warn "Tracer $(tracer_name) required by an interaction function not found in state. Skipping interaction."
+                            break
+                        end
+                    end
+                    if !all_tracers_exist; continue; end
+
+                    # Call the user-defined function
+                    dC = interaction.interaction_function(concentrations, environment, dt)
+
+                    # Apply the calculated changes
+                    for (tracer_name, change) in dC
+                        if haskey(state.tracers, tracer_name)
+                            state.tracers[tracer_name][i_glob, j_glob, k_glob] += change
+                        end
                     end
                 end
             end

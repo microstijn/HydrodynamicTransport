@@ -10,23 +10,24 @@ using ..HydrodynamicTransport.HorizontalTransportModule
 using ..HydrodynamicTransport.VerticalTransportModule
 using ..HydrodynamicTransport.SourceSinkModule
 using ..HydrodynamicTransport.BoundaryConditionsModule
+using ..HydrodynamicTransport.VerticalTransportModule: _apply_sedimentation_backward_euler!, _apply_sedimentation_forward_euler!
 using ProgressMeter
 using NCDatasets
-using JLD2 # Added for saving state objects
+using JLD2
 
-# --- Test/Placeholder Versions ---
 """
-    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; ...)
+    run_simulation(grid, initial_state, sources, start_time, end_time, dt; kwargs...)
 
-Runs a simulation using placeholder hydrodynamics.
+Main simulation driver that runs the hydrodynamic transport model using **placeholder hydrodynamics**.
+This version is intended for idealized test cases or scenarios where hydrodynamic data is generated
+on-the-fly rather than read from a file.
 
-This function orchestrates the main simulation loop, stepping through time and calling the
-necessary physics modules at each step. It is designed for test cases or scenarios where
-hydrodynamic data is not read from a file.
+The function orchestrates the main simulation loop, stepping through time from `start_time` to
+`end_time` with a time step `dt`, and calling the necessary physics modules at each step.
 
 # Arguments
-- `grid::AbstractGrid`: The computational grid.
-- `initial_state::State`: The initial state of the model.
+- `grid::AbstractGrid`: The computational grid (e.g., `CartesianGrid` or `CurvilinearGrid`).
+- `initial_state::State`: The initial state of the model, containing tracer concentrations, velocities, etc.
 - `sources::Vector{PointSource}`: A vector of point sources for tracers.
 - `start_time::Float64`: The simulation start time in seconds.
 - `end_time::Float64`: The simulation end time in seconds.
@@ -34,14 +35,13 @@ hydrodynamic data is not read from a file.
 
 # Keyword Arguments
 - `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
-- `advection_scheme::Symbol`: The advection scheme to use (`:TVD`, `:UP3`, or `:ImplicitADI`). Defaults to `:TVD`.
-  `:ImplicitADI` is an unconditionally stable implicit method suitable for large time steps.
-- `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
-  depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
-  cell face are blocked. Defaults to `0.0`.
-- `output_dir::Union{String, Nothing}`: Directory to save state snapshots. If `nothing`, no output is saved.
+- `functional_interactions::Vector{FunctionalInteraction}`: A vector of functions that model interactions between tracers (e.g., adsorption/desorption).
+- `sediment_tracers::Dict{Symbol, SedimentParams}`: A dictionary mapping sediment tracer names to their parameters. The presence of a tracer in this dictionary flags it for sediment transport physics.
+- `advection_scheme::Symbol`: The advection scheme to use. Options: `:TVD` (Total Variation Diminishing), `:Upwind3` (3rd-order upwind), or `:ImplicitADI` (Alternating Direction Implicit). Defaults to `:TVD`.
+- `D_crit::Float64`: The critical water depth (in meters) for wetting and drying. Advective/diffusive fluxes are blocked from cell faces where the upstream water depth is below this value. Also used to disable sedimentation physics in very shallow cells. Defaults to `0.0`.
+- `output_dir::Union{String, Nothing}`: Directory to save state snapshots as JLD2 files. If `nothing`, no output is saved.
 - `output_interval::Union{Float64, Nothing}`: Time interval in seconds for saving state snapshots.
-- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from.
+- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from. If provided, the simulation will load the state from this file and continue from its timestamp.
 
 # Returns
 - `State`: The final state of the model after the simulation.
@@ -56,7 +56,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         output_interval::Union{Float64, Nothing}=nothing,
                         restart_from::Union{String, Nothing}=nothing)
     
-    # --- Logic to handle starting a new simulation vs. restarting ---
     local state_to_run, effective_start_time
     if restart_from !== nothing
         println("--- Restarting simulation from checkpoint: $restart_from ---")
@@ -69,11 +68,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     end
 
     state = deepcopy(state_to_run)
-
-
     time_range = effective_start_time:dt:end_time
     
-    # --- Setup for file-based output ---
     next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
     if output_dir !== nothing
         mkpath(output_dir)
@@ -86,15 +82,29 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt, sediment_tracers)
+        vertical_transport!(state, grid, dt, sediment_tracers, D_crit)
+        
+        g = 9.81
+        for (tracer_name, params) in sediment_tracers
+            bed_mass_array = state.bed_mass[tracer_name]
+            tracer_array = state.tracers[tracer_name]
+            for j_phys in 1:grid.ny, i_phys in 1:grid.nx
+                i_glob, j_glob = i_phys + grid.ng, j_phys + grid.ng
+                col_view = view(tracer_array, i_glob, j_glob, :)
+                if params.settling_scheme == :BackwardEuler
+                    _apply_sedimentation_backward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                else # Default to ForwardEuler
+                    _apply_sedimentation_forward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                end
+            end
+        end
+
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
-        # Enforce positivity for all tracers as a safeguard
         for C in values(state.tracers)
             C .= max.(0.0, C)
         end
 
-        # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
             JLD2.save_object(output_filename, state)
@@ -104,7 +114,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-# This function remains for in-memory storage, useful for small tests
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
@@ -112,8 +121,6 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
-
-
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
     last_output_time = start_time
@@ -124,10 +131,25 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics_placeholder!(state, grid, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt, sediment_tracers)
+        vertical_transport!(state, grid, dt, sediment_tracers, D_crit)
+        
+        g = 9.81
+        for (tracer_name, params) in sediment_tracers
+            bed_mass_array = state.bed_mass[tracer_name]
+            tracer_array = state.tracers[tracer_name]
+            for j_phys in 1:grid.ny, i_phys in 1:grid.nx
+                i_glob, j_glob = i_phys + grid.ng, j_phys + grid.ng
+                col_view = view(tracer_array, i_glob, j_glob, :)
+                if params.settling_scheme == :BackwardEuler
+                    _apply_sedimentation_backward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                else # Default to ForwardEuler
+                    _apply_sedimentation_forward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                end
+            end
+        end
+
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
-        # Enforce positivity for all tracers as a safeguard
         for C in values(state.tracers)
             C .= max.(0.0, C)
         end
@@ -141,36 +163,34 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
     return results, timesteps
 end
 
-# --- Real Data Versions ---
 """
-    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; ...)
+    run_simulation(grid, initial_state, sources, ds, hydro_data, start_time, end_time, dt; kwargs...)
 
-Runs a simulation using hydrodynamics from a NetCDF data source.
+Main simulation driver that runs the hydrodynamic transport model using **hydrodynamics from a NetCDF file**.
+This is the primary function for running realistic simulations.
 
-This function orchestrates the main simulation loop, stepping through time and calling the
-necessary physics modules at each step. It is designed for realistic simulations where
-hydrodynamic data (like velocity fields and sea surface height) is read from a file.
+The function orchestrates the main simulation loop, stepping through time from `start_time` to
+`end_time` with a time step `dt`, and calling the necessary physics modules at each step.
 
 # Arguments
-- `grid::AbstractGrid`: The computational grid.
-- `initial_state::State`: The initial state of the model.
+- `grid::AbstractGrid`: The computational grid (e.g., `CartesianGrid` or `CurvilinearGrid`).
+- `initial_state::State`: The initial state of the model, containing tracer concentrations, velocities, etc.
 - `sources::Vector{PointSource}`: A vector of point sources for tracers.
 - `ds::NCDataset`: An opened NetCDF dataset containing the hydrodynamic data.
-- `hydro_data::HydrodynamicData`: A struct mapping standard variable names to names in the NetCDF file.
+- `hydro_data::HydrodynamicData`: A struct mapping standard variable names (e.g., `:u`, `:v`) to the corresponding variable names in the NetCDF file.
 - `start_time::Float64`: The simulation start time in seconds.
 - `end_time::Float64`: The simulation end time in seconds.
 - `dt::Float64`: The time step duration in seconds.
 
 # Keyword Arguments
 - `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions to apply.
-- `advection_scheme::Symbol`: The advection scheme to use (`:TVD`, `:UP3`, or `:ImplicitADI`). Defaults to `:TVD`.
-  `:ImplicitADI` is an unconditionally stable implicit method suitable for large time steps.
-- `D_crit::Float64`: The critical water depth for cell-face blocking. If the upstream water
-  depth (`grid.h + state.zeta`) is below this value, advective and diffusive fluxes from that
-  cell face are blocked. Defaults to `0.0`.
-- `output_dir::Union{String, Nothing}`: Directory to save state snapshots. If `nothing`, no output is saved.
+- `functional_interactions::Vector{FunctionalInteraction}`: A vector of functions that model interactions between tracers (e.g., adsorption/desorption).
+- `sediment_tracers::Dict{Symbol, SedimentParams}`: A dictionary mapping sediment tracer names to their parameters. The presence of a tracer in this dictionary flags it for sediment transport physics.
+- `advection_scheme::Symbol`: The advection scheme to use. Options: `:TVD` (Total Variation Diminishing), `:Upwind3` (3rd-order upwind), or `:ImplicitADI` (Alternating Direction Implicit). Defaults to `:TVD`.
+- `D_crit::Float64`: The critical water depth (in meters) for wetting and drying. Advective/diffusive fluxes are blocked from cell faces where the upstream water depth is below this value. Also used to disable sedimentation physics in very shallow cells. Defaults to `0.0`.
+- `output_dir::Union{String, Nothing}`: Directory to save state snapshots as JLD2 files. If `nothing`, no output is saved.
 - `output_interval::Union{Float64, Nothing}`: Time interval in seconds for saving state snapshots.
-- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from.
+- `restart_from::Union{String, Nothing}`: Path to a JLD2 file to restart the simulation from. If provided, the simulation will load the state from this file and continue from its timestamp.
 
 # Returns
 - `State`: The final state of the model after the simulation.
@@ -185,7 +205,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         output_interval::Union{Float64, Nothing}=nothing,
                         restart_from::Union{String, Nothing}=nothing)
     
-    # --- Logic to handle starting a new simulation vs. restarting ---
     local state_to_run, effective_start_time
     if restart_from !== nothing
         println("--- Restarting simulation from checkpoint: $restart_from ---")
@@ -198,10 +217,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     end
 
     state = deepcopy(state_to_run)
-
     time_range = effective_start_time:dt:end_time
     
-    # --- Setup for file-based output ---
     next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
     if output_dir !== nothing
         mkpath(output_dir)
@@ -214,15 +231,29 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt, sediment_tracers)
+        vertical_transport!(state, grid, dt, sediment_tracers, D_crit)
+        
+        g = 9.81
+        for (tracer_name, params) in sediment_tracers
+            bed_mass_array = state.bed_mass[tracer_name]
+            tracer_array = state.tracers[tracer_name]
+            for j_phys in 1:grid.ny, i_phys in 1:grid.nx
+                i_glob, j_glob = i_phys + grid.ng, j_phys + grid.ng
+                col_view = view(tracer_array, i_glob, j_glob, :)
+                if params.settling_scheme == :BackwardEuler
+                    _apply_sedimentation_backward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                else # Default to ForwardEuler
+                    _apply_sedimentation_forward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                end
+            end
+        end
+
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
-        # Enforce positivity for all tracers as a safeguard
         for C in values(state.tracers)
             C .= max.(0.0, C)
         end
 
-        # --- Save state to disk if configured ---
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
             JLD2.save_object(output_filename, state)
@@ -232,7 +263,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-# This function remains for in-memory storage
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
@@ -240,8 +270,6 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
-
-
     time_range = start_time:dt:end_time
     results = [deepcopy(state)]; timesteps = [start_time]
     last_output_time = start_time
@@ -252,10 +280,25 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         apply_boundary_conditions!(state, grid, boundary_conditions)
         update_hydrodynamics!(state, grid, ds, hydro_data, time)
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
-        vertical_transport!(state, grid, dt, sediment_tracers)
+        vertical_transport!(state, grid, dt, sediment_tracers, D_crit)
+        
+        g = 9.81
+        for (tracer_name, params) in sediment_tracers
+            bed_mass_array = state.bed_mass[tracer_name]
+            tracer_array = state.tracers[tracer_name]
+            for j_phys in 1:grid.ny, i_phys in 1:grid.nx
+                i_glob, j_glob = i_phys + grid.ng, j_phys + grid.ng
+                col_view = view(tracer_array, i_glob, j_glob, :)
+                if params.settling_scheme == :BackwardEuler
+                    _apply_sedimentation_backward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                else # Default to ForwardEuler
+                    _apply_sedimentation_forward_euler!(col_view, bed_mass_array, grid, state, params, i_glob, j_glob, dt, g, D_crit)
+                end
+            end
+        end
+        
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
 
-        # Enforce positivity for all tracers as a safeguard
         for C in values(state.tracers)
             C .= max.(0.0, C)
         end

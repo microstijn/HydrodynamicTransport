@@ -120,10 +120,11 @@ end
 
 # warm up
 
-run_the_simulation()
+run_the_simulation(:ImplicitADI)
 
 @benchmark run_the_simulation(:ImplicitADI)
 
-run_the_simulation(:TVD);
+run_the_simulation(:TVD)
+
 @benchmark run_the_simulation(:TVD)
 

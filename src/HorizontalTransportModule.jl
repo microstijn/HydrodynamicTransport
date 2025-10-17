@@ -48,13 +48,13 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
             advect_y_up3!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
         elseif scheme == :ImplicitADI
             # Step 1: Implicit X-Sweep: (I - dt*L_x) * C_intermediate = C_initial
-            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt, D_crit)
 
             # Step 1.5: Handle Boundary Conditions for the Intermediate Variable
             apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
 
             # Step 2: Implicit Y-Sweep: (I - dt*L_y) * C_final = C_intermediate
-            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt) # Result stored back in C_initial
+            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt, D_crit) # Result stored back in C_initial
         else
             error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
         end
@@ -464,108 +464,144 @@ end
 # ==============================================================================
 
 """
-    advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+    advect_implicit_x!(C_intermediate, C_initial, state, grid, dt, D_crit)
 
 Performs the first step of the ADI sequence (implicit x-sweep).
 Solves `(I - dt*L_x) * C_intermediate = C_initial` for each row.
 """
-function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, D_crit::Float64)
     nx, ny, nz = get_grid_dims(grid)
     ng = grid.ng
     u = state.u
 
-    # Pre-allocate vectors for the tridiagonal system
-    a = Vector{Float64}(undef, nx - 1) # sub-diagonal
-    b = Vector{Float64}(undef, nx)     # main diagonal
-    c = Vector{Float64}(undef, nx - 1) # super-diagonal
-    d = Vector{Float64}(undef, nx)     # RHS
+    a = Vector{Float64}(undef, nx - 1)
+    b = Vector{Float64}(undef, nx)
+    c = Vector{Float64}(undef, nx - 1)
+    d = Vector{Float64}(undef, nx)
 
     @inbounds Base.Threads.@threads for j_phys in 1:ny
       for k in 1:nz
         j_glob = j_phys + ng
         
-        # --- 1. Construct the tridiagonal system for the current row ---
+        is_row_wet = false
+        if isa(grid, CurvilinearGrid)
+            for i_phys_check in 1:nx
+                i_glob_check = i_phys_check + ng
+                if grid.h[i_glob_check, j_glob] + state.zeta[i_glob_check, j_glob, 1] > D_crit
+                    is_row_wet = true
+                    break
+                end
+            end
+        else
+            is_row_wet = true
+        end
+
+        if !is_row_wet
+            view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= view(C_initial, (ng+1):(nx+ng), j_glob, k)
+            continue
+        end
+
         for i_phys in 1:nx
             i_glob = i_phys + ng
             
-            # Enforce zero-flux boundary conditions for the solver
             u_left = (i_phys == 1) ? 0.0 : u[i_glob, j_glob, k]
             u_right = (i_phys == nx) ? 0.0 : u[i_glob + 1, j_glob, k]
 
             dx_i = get_dx_at_face(grid, i_glob, j_glob)
             dx_ip1 = get_dx_at_face(grid, i_glob + 1, j_glob)
+            
+            V_i = grid.volume[i_glob, j_glob, k]
+            if V_i < 1e-9
+                b[i_phys] = 1.0; d[i_phys] = C_initial[i_glob, j_glob, k]
+                if i_phys > 1; a[i_phys-1] = 0.0; end
+                if i_phys < nx; c[i_phys] = 0.0; end
+                continue
+            end
+            
             cr_left = (dt / dx_i) * u_left
             cr_right = (dt / dx_ip1) * u_right
-            
-            alpha = max(cr_left, 0)
-            gamma = min(cr_right, 0)
-            beta = max(cr_right, 0) - min(cr_left, 0)
 
-            if i_phys > 1; a[i_phys-1] = -alpha; end
-            b[i_phys] = 1 + beta
-            if i_phys < nx; c[i_phys] = gamma; end
+            if i_phys > 1; a[i_phys-1] = -max(cr_left, 0.0); end
+            b[i_phys] = 1.0 + max(cr_right, 0.0) - min(cr_left, 0.0)
+            if i_phys < nx; c[i_phys] = min(cr_right, 0.0); end
             d[i_phys] = C_initial[i_glob, j_glob, k]
         end
 
-        # --- 2. Solve the system using LinearAlgebra ---
         A = Tridiagonal(a, b, c)
         solution = A \ d
         
-        # --- 3. Store the result in the intermediate buffer's physical domain ---
         view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= solution
       end
     end
 end
 
 """
-    advect_implicit_y!(C_final, C_intermediate, state, grid, dt)
+    advect_implicit_y!(C_final, C_intermediate, state, grid, dt, D_crit)
 
 Performs the second step of the ADI sequence (implicit y-sweep).
 Solves `(I - dt*L_y) * C_final = C_intermediate` for each column.
 """
-function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, D_crit::Float64)
     nx, ny, nz = get_grid_dims(grid)
     ng = grid.ng
     v = state.v
 
-    # Pre-allocate vectors for the tridiagonal system
-    a = Vector{Float64}(undef, ny - 1) # sub-diagonal
-    b = Vector{Float64}(undef, ny)     # main-diagonal
-    c = Vector{Float64}(undef, ny - 1) # super-diagonal
-    d = Vector{Float64}(undef, ny)     # RHS
+    a = Vector{Float64}(undef, ny - 1)
+    b = Vector{Float64}(undef, ny)
+    c = Vector{Float64}(undef, ny - 1)
+    d = Vector{Float64}(undef, ny)
 
     @inbounds Base.Threads.@threads for i_phys in 1:nx
       for k in 1:nz
         i_glob = i_phys + ng
 
-        # --- 1. Construct the tridiagonal system for the current column ---
+        is_col_wet = false
+        if isa(grid, CurvilinearGrid)
+            for j_phys_check in 1:ny
+                j_glob_check = j_phys_check + ng
+                if grid.h[i_glob, j_glob_check] + state.zeta[i_glob, j_glob_check, 1] > D_crit
+                    is_col_wet = true
+                    break
+                end
+            end
+        else
+            is_col_wet = true
+        end
+
+        if !is_col_wet
+            view(C_final, i_glob, (ng+1):(ny+ng), k) .= view(C_intermediate, i_glob, (ng+1):(ny+ng), k)
+            continue
+        end
+
         for j_phys in 1:ny
             j_glob = j_phys + ng
             
-            # Enforce zero-flux boundary conditions for the solver
             v_bottom = (j_phys == 1) ? 0.0 : v[i_glob, j_glob, k]
             v_top = (j_phys == ny) ? 0.0 : v[i_glob, j_glob + 1, k]
 
             dy_j = get_dy_at_face(grid, i_glob, j_glob)
             dy_jp1 = get_dy_at_face(grid, i_glob, j_glob + 1)
+
+            V_j = grid.volume[i_glob, j_glob, k]
+            if V_j < 1e-9
+                b[j_phys] = 1.0; d[j_phys] = C_intermediate[i_glob, j_glob, k]
+                if j_phys > 1; a[j_phys-1] = 0.0; end
+                if j_phys < ny; c[j_phys] = 0.0; end
+                continue
+            end
+            
             cr_bottom = (dt / dy_j) * v_bottom
             cr_top = (dt / dy_jp1) * v_top
 
-            alpha = max(cr_bottom, 0)
-            gamma = min(cr_top, 0)
-            beta = max(cr_top, 0) - min(cr_bottom, 0)
-
-            if j_phys > 1; a[j_phys-1] = -alpha; end
-            b[j_phys] = 1 + beta
-            if j_phys < ny; c[j_phys] = gamma; end
+            if j_phys > 1; a[j_phys-1] = -max(cr_bottom, 0.0); end
+            b[j_phys] = 1.0 + max(cr_top, 0.0) - min(cr_bottom, 0.0)
+            if j_phys < ny; c[j_phys] = min(cr_top, 0.0); end
             d[j_phys] = C_intermediate[i_glob, j_glob, k]
         end
 
-        # --- 2. Solve the system using LinearAlgebra ---
         A = Tridiagonal(a, b, c)
         solution = A \ d
 
-        # --- 3. Store the result back into the final tracer array's physical domain ---
         view(C_final, i_glob, (ng+1):(ny+ng), k) .= solution
       end
     end

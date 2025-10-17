@@ -17,6 +17,7 @@ using Base: @kwdef
     tau_d::Float64 = 0.1
     tau_cr::Float64 = 0.2
     M::Float64 = 0.0001
+    settling_scheme::Symbol = :ForwardEuler
 end
 
 abstract type AbstractGrid end

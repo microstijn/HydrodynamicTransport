@@ -17,6 +17,8 @@ include("Hydrodynamics.jl")
 include("SettlingModule.jl")
 include("BedExchangeModule.jl")
 # ---------------------------------
+# Added oyster
+include("OysterModule.jl")
 
 include("TimeSteppingModule.jl")
 include("UtilsModule.jl") 
@@ -32,6 +34,7 @@ using .HorizontalTransportModule
 using .VerticalTransportModule
 using .SourceSinkModule
 using .HydrodynamicsModule
+using .OysterModule
 using .TimeSteppingModule
 using .UtilsModule
 # Note: The new modules are used internally by TimeSteppingModule,
@@ -42,7 +45,7 @@ using .UtilsModule
 # Types from ModelStructs.jl
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
-       SedimentParams # Export the new struct
+       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
        
 # Functions from GridModule.jl
 export initialize_cartesian_grid, initialize_curvilinear_grid

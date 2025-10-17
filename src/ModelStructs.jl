@@ -4,7 +4,7 @@ module ModelStructs
 
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
-       SedimentParams # Export the new struct
+       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
 
 using StaticArrays
 using Base: @kwdef
@@ -61,11 +61,59 @@ end
     interaction_function::Function
 end
 
+"""
+    DecayParams
+
+Parameters for a first-order tracer decay model where the decay rate can depend on
+temperature and sunlight. This struct is designed to be used with the `FunctionalInteraction`
+framework.
+
+# Example
+```julia
+# Configure decay for a tracer named :Virus
+# It has a base 5-day half-life at 20°C and is sensitive to temperature.
+decay_for_virus = DecayParams(
+    tracer_name = :Virus,
+    base_rate = 1.0 / (5 * 24 * 3600.0), # Convert 5-day half-life to 1/s
+    temp_theta = 1.07,
+    light_coeff = 0.0 # No light dependence in this example
+)
+"""
+@kwdef struct DecayParams
+    tracer_name::Symbol
+    base_rate::Float64 = 0.0
+    temp_ref::Float64 = 20.0
+    temp_theta::Float64 = 1.0
+    light_coeff::Float64 = 0.0 
+end
+
 # NEW: Parameters for sediment tracers
 @kwdef struct SedimentParams
     ws::Float64             # Settling velocity (m/s, positive downwards)
     erosion_rate::Float64   # A simple constant erosion rate (kg/m^2/s)
     tau_ce::Float64 = 0.05  # Critical shear stress for erosion (Pa)
+end
+
+@kwdef struct OysterParams
+    wdw::Float64 = 0.5
+    ϵ_free::Float64 = 0.5
+    ϵ_sorbed::Float64 = 0.1
+    tss_reject::Float64 = 5.0
+    tss_clog::Float64 = 100.0
+    kdep_20::Float64 = 0.23
+    θ_dep::Float64 = 1.07
+end
+
+mutable struct OysterState
+    c_oyster::Float64
+end
+
+struct VirtualOyster
+    i::Int
+    j::Int
+    k::Int
+    params::OysterParams
+    state::OysterState
 end
 
 abstract type BoundaryCondition end

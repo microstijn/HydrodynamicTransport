@@ -10,24 +10,22 @@ using ..HydrodynamicTransport.HorizontalTransportModule
 using ..HydrodynamicTransport.VerticalTransportModule
 using ..HydrodynamicTransport.SourceSinkModule
 using ..HydrodynamicTransport.BoundaryConditionsModule
-# --- ADDED FOR SEDIMENTATION ---
+# --- Added for new physics modules ---
 using ..HydrodynamicTransport.SettlingModule
 using ..HydrodynamicTransport.BedExchangeModule
-# ---------------------------------
+using ..HydrodynamicTransport.OysterModule
+# ------------------------------------
 using ProgressMeter
 using NCDatasets
 using JLD2
 
 # --- Test/Placeholder Versions ---
-"""
-    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; ...)
-
-Runs a simulation using placeholder hydrodynamics.
-"""
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
-                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(), # NEW
+                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                        virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                        oyster_tracers::NamedTuple=NamedTuple(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -49,9 +47,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     time_range = effective_start_time:dt:end_time
     
     next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
-    if output_dir !== nothing
-        mkpath(output_dir)
-    end
+    if output_dir !== nothing; mkpath(output_dir); end
     
     @showprogress "Simulating (Test Mode)..." for (step, time) in enumerate(time_range)
         if time == effective_start_time; continue; end
@@ -62,12 +58,14 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         
-        # --- SEDIMENTATION SEQUENCE ---
         deposition = apply_settling!(state, grid, dt, sediment_params)
         bed_exchange!(state, grid, dt, deposition, sediment_params)
-        # ----------------------------
 
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
 
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
@@ -78,11 +76,12 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-# This function remains for in-memory storage, useful for small tests
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
-                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(), # NEW
+                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                                  virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                                  oyster_tracers::NamedTuple=NamedTuple(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
@@ -98,12 +97,14 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
 
-        # --- SEDIMENTATION SEQUENCE ---
         deposition = apply_settling!(state, grid, dt, sediment_params)
         bed_exchange!(state, grid, dt, deposition, sediment_params)
-        # ----------------------------
 
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
         
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))
@@ -115,15 +116,12 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
 end
 
 # --- Real Data Versions ---
-"""
-    run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; ...)
-
-Runs a simulation using hydrodynamics from a NetCDF data source.
-"""
 function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
                         boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                         functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
-                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(), # NEW
+                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                        virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                        oyster_tracers::NamedTuple=NamedTuple(),
                         advection_scheme::Symbol=:TVD,
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
@@ -145,9 +143,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     time_range = effective_start_time:dt:end_time
     
     next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
-    if output_dir !== nothing
-        mkpath(output_dir)
-    end
+    if output_dir !== nothing; mkpath(output_dir); end
     
     @showprogress "Simulating (Real Data)..." for (step, time) in enumerate(time_range)
         if time == effective_start_time; continue; end
@@ -158,12 +154,14 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
         
-        # --- SEDIMENTATION SEQUENCE ---
         deposition = apply_settling!(state, grid, dt, sediment_params)
         bed_exchange!(state, grid, dt, deposition, sediment_params)
-        # ----------------------------
 
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
 
         if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
@@ -174,11 +172,12 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     return state
 end
 
-# This function remains for in-memory storage
 function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
                                   boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
                                   functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
-                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(), # NEW
+                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                                  virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                                  oyster_tracers::NamedTuple=NamedTuple(),
                                   advection_scheme::Symbol=:TVD,
                                   D_crit::Float64=0.0)
     state = deepcopy(initial_state)
@@ -194,12 +193,14 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
         vertical_transport!(state, grid, dt)
 
-        # --- SEDIMENTATION SEQUENCE ---
         deposition = apply_settling!(state, grid, dt, sediment_params)
         bed_exchange!(state, grid, dt, deposition, sediment_params)
-        # ----------------------------
 
         source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
 
         if time >= last_output_time + output_interval - 1e-9
             push!(results, deepcopy(state))

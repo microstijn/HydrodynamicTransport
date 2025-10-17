@@ -105,7 +105,7 @@ functional_interactions = [virus_interaction]
 
 # --- 6. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 48*60*60.0 # Run for 12 hours
+end_time = 12*60.0 # Run for 12 hours
 dt = 6.0             # Use a large timestep, enabled by the implicit schemes
 
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]

@@ -7,31 +7,32 @@ export create_hydrodynamic_data_from_file
 export lonlat_to_ij
 
 using NCDatasets
+using Dates
 using ..HydrodynamicTransport.ModelStructs
 
+
 """
-    estimate_stable_timestep(hydro_data::HydrodynamicData; ...)
+    estimate_stable_timestep(hydro_data; advection_scheme, start_time, end_time, ...)
 
-Estimates a recommended timestep (dt) based on the chosen advection scheme.
+Estimates a recommended timestep (dt) based on the chosen advection scheme and time window.
 
-- For **explicit schemes** (`:TVD`, `:UP3`), it calculates a stability-limited
-  timestep based on the Courant-Friedrichs-Lewy (CFL) condition.
-- For **implicit schemes** (`:ImplicitADI`), it provides an accuracy-limited
-  timestep recommendation, as the scheme is unconditionally stable.
-
-By default, it uses a fast sampling method to find maximum velocities. To check
-the full dataset (slower but more accurate), set `time_samples=nothing`.
+By default, it uses a fast sampling method to find maximum velocities within the specified
+time window. To check the full time window (slower but more accurate), set `time_samples=nothing`.
 
 # Arguments
 - `hydro_data`: The `HydrodynamicData` object for the simulation.
-- `advection_scheme::Symbol`: The advection scheme to be used (`:TVD`, `:UP3`, `:ImplicitADI`). Defaults to `:TVD`.
-- `dx_var`, `dy_var`: Names of the grid cell size variables in the NetCDF file (e.g., "dx", "dy").
+- `advection_scheme::Symbol`: The advection scheme to be used (`:TVD`, `:UP3`, `:ImplicitADI`).
+- `start_time::Union{Float64, Nothing}`: The simulation start time in seconds to begin sampling. If `nothing`, starts from the beginning of the file.
+- `end_time::Union{Float64, Nothing}`: The simulation end time in seconds to stop sampling. If `nothing`, samples until the end of the file.
+- `dx_var::String`, `dy_var::String`: Names of the grid cell size variables in the NetCDF file.
 - `safety_factor`: For explicit schemes, the factor to reduce the calculated CFL timestep for safety (e.g., 0.8).
 - `CFL_acc`: For implicit schemes, the desired "accuracy Courant number" to base the recommendation on (e.g., 5.0).
-- `time_samples`: Number of time steps to sample for velocity checks. `nothing` scans the entire dataset.
+- `time_samples`: Number of time steps to sample for velocity checks. `nothing` scans the entire specified time window.
 """
 function estimate_stable_timestep(hydro_data::HydrodynamicData; 
                                  advection_scheme::Symbol=:TVD,
+                                 start_time::Union{Float64, Nothing}=nothing,
+                                 end_time::Union{Float64, Nothing}=nothing,
                                  dx_var::String="dx", 
                                  dy_var::String="dy", 
                                  safety_factor=0.8,
@@ -43,12 +44,13 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
     
     u_var = get(hydro_data.var_map, :u, "u")
     v_var = get(hydro_data.var_map, :v, "v")
+    time_var = get(hydro_data.var_map, :time, "ocean_time")
 
     local u_max, v_max, dx_min, dy_min
     
     try
         ds = NCDataset(filepath)
-        # 1. Find minimum grid spacing from dx and dy variables
+        # 1. Find minimum grid spacing
         if !haskey(ds, dx_var) || !haskey(ds, dy_var); error("Grid spacing variables '$dx_var' or '$dy_var' not found."); end
         dx_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dx_var][:]))
         dy_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dy_var][:]))
@@ -56,54 +58,63 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
 
         # 2. Find maximum velocities
         if !haskey(ds, u_var) || !haskey(ds, v_var); error("Velocity variables '$u_var' or '$v_var' not found."); end
-        if time_samples === nothing
-            println("Scanning entire dataset for maximum velocities (this may be slow)...")
-            u_max = maximum(abs, skipmissing(ds[u_var]));
-            v_max = maximum(abs, skipmissing(ds[v_var]));
+        
+        # Convert DateTime objects to elapsed seconds for comparison
+        time_dim_raw = ds[time_var][:]
+        time_dim_seconds = if eltype(time_dim_raw) <: Dates.AbstractTime
+            t0 = time_dim_raw[1]
+            [(dt - t0).value / 1000.0 for dt in time_dim_raw]
         else
-            println("Sampling $time_samples time steps for maximum velocities...")
-            # Robustly find the time dimension and its index
-            time_dim_name = dimnames(ds[u_var])[end]
-            time_dim_idx = findfirst(d -> d == time_dim_name, dimnames(ds[u_var]))
-            if isnothing(time_dim_idx)
-                error("Could not find the time dimension for variable '$u_var'.")
-            end
-            n_times = ds.dim[time_dim_name]
-            indices_to_sample = round.(Int, range(1, stop=n_times, length=time_samples))
-            
-            u_max_samples = Float64[]
-            v_max_samples = Float64[]
-            
+            time_dim_raw
+        end
+
+        # Find the start and end indices corresponding to the provided times
+        start_idx = start_time !== nothing ? searchsortedfirst(time_dim_seconds, start_time) : 1
+        end_idx = end_time !== nothing ? searchsortedlast(time_dim_seconds, end_time) : length(time_dim_seconds)
+        if end_idx < start_idx; end_idx = start_idx; end
+
+        # Robustness check: if the window is too small, expand it to get a good sample.
+        num_available_steps = end_idx - start_idx + 1
+        num_samples = time_samples === nothing ? num_available_steps : time_samples
+        
+        if num_available_steps < num_samples
+            println("Warning: Specified time window is too small or data resolution is too coarse.")
+            new_end_idx = min(start_idx + num_samples - 1, length(time_dim_seconds))
+            println("Expanding search window from indices [$start_idx, $end_idx] to [$start_idx, $new_end_idx].")
+            end_idx = new_end_idx
+        end
+
+        println("Sampling for velocities between time index $start_idx and $end_idx...")
+        
+        if time_samples === nothing
+            slicer = (fill(Colon(), ndims(ds[u_var]) - 1)..., start_idx:end_idx)
+            u_max = maximum(abs, skipmissing(ds[u_var][slicer...]));
+            v_max = maximum(abs, skipmissing(ds[v_var][slicer...]));
+        else
+            indices_to_sample = round.(Int, range(start_idx, stop=end_idx, length=num_samples))
+            u_max_samples, v_max_samples = Float64[], Float64[]
             for t_idx in unique(indices_to_sample)
-                # Create a slicer for positional indexing, ensuring it can hold mixed types
-                slicer = Vector{Any}(fill(Colon(), ndims(ds[u_var])))
-                slicer[time_dim_idx] = t_idx
-                
-                u_slice = ds[u_var][slicer...]
-                v_slice = ds[v_var][slicer...]
-                push!(u_max_samples, maximum(abs, skipmissing(u_slice)))
-                push!(v_max_samples, maximum(abs, skipmissing(v_slice)))
+                slicer = (fill(Colon(), ndims(ds[u_var]) - 1)..., t_idx)
+                push!(u_max_samples, maximum(abs, skipmissing(ds[u_var][slicer...])))
+                push!(v_max_samples, maximum(abs, skipmissing(ds[v_var][slicer...])))
             end
             u_max = maximum(u_max_samples); v_max = maximum(v_max_samples)
         end
-        println("Maximum grid-aligned velocities found: u_max ≈ $(round(u_max, digits=2))m/s, v_max ≈ $(round(v_max, digits=2))m/s")
+        println("Maximum grid-aligned velocities found in window: u_max ≈ $(round(u_max, digits=2))m/s, v_max ≈ $(round(v_max, digits=2))m/s")
         close(ds)
     catch e
         println("Error during data loading for timestep estimation: $e"); return -1.0
     end
 
-    # 3. Calculate timestep based on the chosen scheme
+    # 3. Calculate timestep
     if u_max < 1e-9 && v_max < 1e-9
         @warn "Velocities are zero or negligible; cannot estimate timestep."
         return Inf
     end
 
-    local recommended_dt::Float64
     cfl_denominator = (u_max / dx_min + v_max / dy_min)
-
     if advection_scheme in (:TVD, :UP3)
-        dt_cfl = 1 / cfl_denominator
-        recommended_dt = dt_cfl * safety_factor
+        recommended_dt = (1 / cfl_denominator) * safety_factor
         println("--------------------------------------------------")
         println("Recommended STABLE timestep (dt): $(round(recommended_dt, digits=2)) seconds")
         println(" (Based on CFL stability limit with safety factor $safety_factor)")
@@ -113,7 +124,6 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
         println("--------------------------------------------------")
         println("Recommended ACCURACY timestep (dt): $(round(recommended_dt, digits=2)) seconds")
         println(" (Based on accuracy Courant number CFL_acc = $CFL_acc)")
-        println(" (The :ImplicitADI scheme is unconditionally stable)")
         println("--------------------------------------------------")
     else
         error("Unknown advection scheme '$advection_scheme' for timestep estimation.")
@@ -121,6 +131,7 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
     
     return recommended_dt
 end
+
 
 """
     create_hydrodynamic_data_from_file(filepath::String) -> HydrodynamicData

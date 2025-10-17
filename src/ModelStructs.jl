@@ -96,8 +96,8 @@ end
 
 @kwdef struct OysterParams
     wdw::Float64 = 0.5
-    ϵ_free::Float64 = 0.5
-    ϵ_sorbed::Float64 = 0.1
+    ϵ_free::Float64 = 0.01
+    ϵ_sorbed::Float64 = 0.8
     tss_reject::Float64 = 5.0
     tss_clog::Float64 = 100.0
     kdep_20::Float64 = 0.23

@@ -50,7 +50,7 @@ bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:No
 
 start_time = 0.0 # Start from the beginning of the dataset
 dt = round(st)
-end_time = 2*48 * 60 * 60.0 # Run for 12 hours to keep the test quick
+end_time = 2 * 60 * 60.0 # Run for 12 hours to keep the test quick
 
 # --- Output Configuration ---
 # Directory where the output .jld2 files will be saved

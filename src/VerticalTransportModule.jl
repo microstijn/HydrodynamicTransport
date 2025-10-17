@@ -64,7 +64,7 @@ function solve_implicit_diffusion_column!(
 end
 
 
-# --- Main transport function ---
+# --- Main transport function (Multithreaded) ---
 function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Kz = 1e-4
     ng = grid.ng
@@ -76,47 +76,52 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
         C_buffer = state._buffers[tracer_name]
 
         # --- 1. Advection Step ---
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
+        # This loop is parallelized. Each thread handles a different set of water columns.
+        Threads.@threads for j_phys in 1:ny
+            @inbounds for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_final[i_glob, j_glob, :]
-            C_col_out = view(C_buffer, i_glob, j_glob, :)
-            
-            # Use a view into the pre-allocated 3D flux buffer
-            flux_z_col = view(state.flux_z, i_glob, j_glob, :)
-            flux_z_col .= 0.0
-
-            for k in 2:nz
-                velocity = state.w[i_glob, j_glob, k]
-                concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
+                C_col_in = C_final[i_glob, j_glob, :]
+                C_col_out = view(C_buffer, i_glob, j_glob, :)
                 
-                face_area = if isa(grid, CartesianGrid)
-                    grid.face_area_z[i_glob, j_glob, k]
-                else # CurvilinearGrid
-                    1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
-                end
-                flux_z_col[k] = velocity * concentration_at_face * face_area
-            end
+                flux_z_col = view(state.flux_z, i_glob, j_glob, :)
+                flux_z_col .= 0.0
 
-            for k in 1:nz
-                flux_divergence = flux_z_col[k+1] - flux_z_col[k]
-                volume = grid.volume[i_glob, j_glob, k]
-                if volume > 0
-                    C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
-                else
-                    C_col_out[k] = C_col_in[k]
+                for k in 2:nz
+                    velocity = state.w[i_glob, j_glob, k]
+                    concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
+                    
+                    face_area = if isa(grid, CartesianGrid)
+                        grid.face_area_z[i_glob, j_glob, k]
+                    else # CurvilinearGrid
+                        1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+                    end
+                    flux_z_col[k] = velocity * concentration_at_face * face_area
+                end
+
+                for k in 1:nz
+                    flux_divergence = flux_z_col[k+1] - flux_z_col[k]
+                    volume = grid.volume[i_glob, j_glob, k]
+                    if volume > 0
+                        C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
+                    else
+                        C_col_out[k] = C_col_in[k]
+                    end
                 end
             end
         end
 
         # --- 2. Diffusion Step ---
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
+        # This loop is also parallelized, as each column's implicit solve is independent.
+        Threads.@threads for j_phys in 1:ny
+            @inbounds for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            C_col_in = C_buffer[i_glob, j_glob, :]
-            C_col_out = view(C_final, i_glob, j_glob, :)
-            
-            solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+                C_col_in = C_buffer[i_glob, j_glob, :]
+                C_col_out = view(C_final, i_glob, j_glob, :)
+                
+                solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+            end
         end
     end
     return nothing

@@ -105,7 +105,7 @@ functional_interactions = [virus_interaction]
 
 # --- 6. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 1260.0 # Run for 12 hours
+end_time = 48*60*60.0 # Run for 12 hours
 dt = 6.0             # Use a large timestep, enabled by the implicit schemes
 
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
@@ -122,14 +122,14 @@ println("Output will be saved to: $output_directory")
 
 final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
-    boundary_conditions = bcs,
-    sediment_params = sediment_params,
+    boundary_conditions     = bcs,
+    sediment_params         = sediment_params,
     functional_interactions = functional_interactions,
-    advection_scheme = :TVD,
-    D_crit           = 0.05,
-    output_dir       = output_directory,
-    output_interval = output_interval_seconds,
-    restart_from = nothing
+    advection_scheme        = :TVD,
+    D_crit                  = 0.05,
+    output_dir              = output_directory,
+    output_interval         = output_interval_seconds,
+    restart_from            = nothing
 )
 
 # --- 8. Clean Up and Summarize ---
@@ -141,10 +141,11 @@ println("Final simulation time: $(round(final_state.time / 3600.0, digits=2)) ho
 total_dissolved_mass = sum(final_state.tracers[:Virus_Dissolved])
 total_sorbed_water_mass = sum(final_state.tracers[:Virus_Sorbed])
 total_bed_mass = sum(final_state.bed_mass[:Virus_Sorbed])
+
 using UnicodePlots
 
 heatmap(
-    final_state.tracers[:Virus_Sorbed][:, :, 1],
+    final_state.tracers[:Virus_Dissolved][:, :, 1],
     width = 50
 )
 

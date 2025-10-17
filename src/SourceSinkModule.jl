@@ -8,12 +8,7 @@ using ..HydrodynamicTransport.ModelStructs
 using ..HydrodynamicTransport.ModelStructs: CurvilinearGrid, CartesianGrid
 
 """
-    _find_nearest_wet_neighbor(start_i, start_j, grid, state, D_crit)
-
 Performs an expanding box search to find the nearest "wet" cell.
-
-A cell is considered "wet" if it's a water cell (`mask_rho` is true) and its total
-water depth (`h + zeta`) exceeds the critical depth `D_crit`.
 """
 function _find_nearest_wet_neighbor(start_i::Int, start_j::Int, grid::CurvilinearGrid, state::State, D_crit::Float64)
     ng = grid.ng
@@ -48,7 +43,9 @@ end
 function source_sink_terms!(state::State, grid::AbstractGrid, sources::Vector{PointSource}, functional_interactions::Vector{FunctionalInteraction}, time::Float64, dt::Float64, D_crit::Float64)
     ng = grid.ng
 
-    # --- Point Source Influx ---
+    # --- Point Source Influx (Single-Threaded) ---
+    # This part is kept single-threaded for safety, as the number of sources is
+    # typically small and the risk of a race condition exists if sources overlap.
     if grid isa CurvilinearGrid
         nx_phys, ny_phys, nz_phys = grid.nx, grid.ny, grid.nz
         for source in sources
@@ -96,53 +93,55 @@ function source_sink_terms!(state::State, grid::AbstractGrid, sources::Vector{Po
         end
     end
 
-    # --- Functional Tracer Interactions ---
+    # --- Functional Tracer Interactions (Multi-Threaded) ---
     if !isempty(functional_interactions)
         nx_p, ny_p, nz_p = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
         
-        # Pre-allocate dictionary and NamedTuple to avoid allocations in the hot loop
-        concentrations = Dict{Symbol, Float64}()
-        
-        for k in 1:nz_p, j in 1:ny_p, i in 1:nx_p
-            i_glob, j_glob, k_glob = i + ng, j + ng, k
+        # Parallelize the outer loop over vertical layers (k).
+        # Each thread will process a different set of horizontal slices.
+        Threads.@threads for k in 1:nz_p
+            # Each thread gets its own private dictionary to avoid race conditions.
+            local_concentrations = Dict{Symbol, Float64}()
 
-            mask_to_use = isa(grid, CurvilinearGrid) ? grid.mask_rho[i_glob, j_glob] : grid.mask[i_glob, j_glob, k_glob]
-            if !mask_to_use
-                continue
-            end
+            for j in 1:ny_p
+                for i in 1:nx_p
+                    i_glob, j_glob, k_glob = i + ng, j + ng, k
 
-            # Gather environmental conditions for this cell
-            depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
-            environment = (
-                T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
-                S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,
-                TSS = isdefined(state, :tss) ? state.tss[i_glob, j_glob, k_glob] : NaN,
-                UVB = isdefined(state, :uvb) ? state.uvb[i_glob, j_glob, k_glob] : NaN,
-                depth = depth
-            )
-
-            for interaction in functional_interactions
-                # Populate the concentrations dictionary for the function
-                empty!(concentrations)
-                all_tracers_exist = true
-                for tracer_name in interaction.affected_tracers
-                    if haskey(state.tracers, tracer_name)
-                        concentrations[tracer_name] = state.tracers[tracer_name][i_glob, j_glob, k_glob]
-                    else
-                        all_tracers_exist = false
-                        @warn "Tracer $(tracer_name) required by an interaction function not found in state. Skipping interaction."
-                        break
+                    mask_to_use = isa(grid, CurvilinearGrid) ? grid.mask_rho[i_glob, j_glob] : grid.mask[i_glob, j_glob, k_glob]
+                    if !mask_to_use
+                        continue
                     end
-                end
-                if !all_tracers_exist; continue; end
 
-                # Call the user-defined function
-                dC = interaction.interaction_function(concentrations, environment, dt)
+                    depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
+                    environment = (
+                        T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
+                        S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,
+                        TSS = isdefined(state, :tss) ? state.tss[i_glob, j_glob, k_glob] : NaN,
+                        UVB = isdefined(state, :uvb) ? state.uvb[i_glob, j_glob, k_glob] : NaN,
+                        depth = depth
+                    )
 
-                # Apply the calculated changes
-                for (tracer_name, change) in dC
-                    if haskey(state.tracers, tracer_name)
-                        state.tracers[tracer_name][i_glob, j_glob, k_glob] += change
+                    for interaction in functional_interactions
+                        empty!(local_concentrations)
+                        all_tracers_exist = true
+                        for tracer_name in interaction.affected_tracers
+                            if haskey(state.tracers, tracer_name)
+                                local_concentrations[tracer_name] = state.tracers[tracer_name][i_glob, j_glob, k_glob]
+                            else
+                                all_tracers_exist = false
+                                @warn "Tracer $(tracer_name) required by an interaction function not found in state. Skipping interaction."
+                                break
+                            end
+                        end
+                        if !all_tracers_exist; continue; end
+
+                        dC = interaction.interaction_function(local_concentrations, environment, dt)
+
+                        for (tracer_name, change) in dC
+                            if haskey(state.tracers, tracer_name)
+                                state.tracers[tracer_name][i_glob, j_glob, k_glob] += change
+                            end
+                        end
                     end
                 end
             end

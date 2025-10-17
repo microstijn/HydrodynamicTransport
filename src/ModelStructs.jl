@@ -3,7 +3,8 @@
 module ModelStructs
 
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
-       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
+       SedimentParams # Export the new struct
 
 using StaticArrays
 using Base: @kwdef
@@ -45,6 +46,7 @@ mutable struct State
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
     time::Float64
+    bed_mass::Dict{Symbol, Array{Float64, 2}} # NEW: Mass per unit area (kg/m^2)
 end
 
 @kwdef struct PointSource
@@ -57,6 +59,13 @@ end
 @kwdef struct FunctionalInteraction
     affected_tracers::Vector{Symbol}
     interaction_function::Function
+end
+
+# NEW: Parameters for sediment tracers
+@kwdef struct SedimentParams
+    ws::Float64             # Settling velocity (m/s, positive downwards)
+    erosion_rate::Float64   # A simple constant erosion rate (kg/m^2/s)
+    tau_ce::Float64 = 0.05  # Critical shear stress for erosion (Pa)
 end
 
 abstract type BoundaryCondition end
@@ -78,7 +87,6 @@ end
     # A function of time that returns a Dict of tracer concentrations for INFLOWING water
     inflow_concentrations::Function # e.g., t -> Dict(:Salinity => 35.0, :TracerX => 0.0)
 end
-
 
 struct HydrodynamicData
     filepath::String

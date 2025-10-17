@@ -299,72 +299,81 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     u = state.u
     fluxes_x .= 0.0
 
-    @inbounds for k in axes(C_in, 3), j_phys in 1:ny
-        j_glob = j_phys + ng
-        # --- Interior Faces ---
-        for i_phys in 3:nx-1
-            i_glob = i_phys + ng
-            velocity = u[i_glob, j_glob, k]
-            if abs(velocity) < 1e-12; continue; end
+    # By adding Threads.@threads here, Julia will automatically and safely
+    # distribute the iterations of the k loop among the available threads.
+    Threads.@threads for k in axes(C_in, 3)
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+            # --- Interior Faces ---
+            for i_phys in 3:nx-1
+                i_glob = i_phys + ng
+                velocity = u[i_glob, j_glob, k]
+                if abs(velocity) < 1e-12; continue; end
 
-            if isa(grid, CurvilinearGrid)
-                if velocity > 0 # Flow L->R
-                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
-                    if upstream_depth < D_crit; velocity = 0.0; end
-                else # Flow R->L
-                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
-                    if upstream_depth < D_crit; velocity = 0.0; end
+                if isa(grid, CurvilinearGrid)
+                    if velocity > 0 # Flow L->R
+                        upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    else # Flow R->L
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    end
                 end
-            end
 
-            donor_idx, receiver_idx = velocity >= 0 ? (i_glob - 1, i_glob) : (i_glob, i_glob - 1)
-            c_stencil = get_stencil_x(C_in, donor_idx, j_glob, k)
-            dx_donor = get_dx_at_face(grid, i_glob, j_glob)
-            a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
-            courant_abs = abs(velocity * dt / dx_donor)
-            if courant_abs > 1.0; courant_abs = 1.0; end
-            
-            integral_right, integral_left = if velocity >= 0
-                _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
-            else
-                _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
-            end
-            
-            C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
-            C_face_low_order = C_in[donor_idx, j_glob, k]
-            c_up_far=C_in[donor_idx - (velocity >= 0 ? 1 : -1), j_glob, k]
-            c_up_near=C_in[donor_idx, j_glob, k]
-            c_down_near=C_in[receiver_idx, j_glob, k]
-            r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
-            r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
-            phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
-            C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
-            C_max = max(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
-            C_min = min(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
-            fluxes_x[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_x[i_glob, j_glob, k]
-        end
-        
-        # --- Boundary Faces ---
-        for i_phys in [1, 2, nx, nx+1]
-            i_glob = i_phys + ng
-            vel = u[i_glob, j_glob, k]
-            if isa(grid, CurvilinearGrid)
-                if vel > 0
-                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
-                    if upstream_depth < D_crit; vel = 0.0; end
-                elseif vel < 0
-                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
-                    if upstream_depth < D_crit; vel = 0.0; end
+                donor_idx, receiver_idx = velocity >= 0 ? (i_glob - 1, i_glob) : (i_glob, i_glob - 1)
+                c_stencil = get_stencil_x(C_in, donor_idx, j_glob, k)
+                dx_donor = get_dx_at_face(grid, i_glob, j_glob)
+                a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
+                courant_abs = abs(velocity * dt / dx_donor)
+                if courant_abs > 1.0; courant_abs = 1.0; end
+                
+                integral_right, integral_left = if velocity >= 0
+                    _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
+                else
+                    _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
                 end
+                
+                C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
+                C_face_low_order = C_in[donor_idx, j_glob, k]
+                c_up_far=C_in[donor_idx - (velocity >= 0 ? 1 : -1), j_glob, k]
+                c_up_near=C_in[donor_idx, j_glob, k]
+                c_down_near=C_in[receiver_idx, j_glob, k]
+                r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
+                r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
+                phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
+                C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
+                C_max = max(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
+                C_min = min(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
+                fluxes_x[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_x[i_glob, j_glob, k]
             end
-            fluxes_x[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]) * grid.face_area_x[i_glob, j_glob, k]
+            
+            # --- Boundary Faces ---
+            for i_phys in [1, 2, nx, nx+1]
+                i_glob = i_phys + ng
+                vel = u[i_glob, j_glob, k]
+                if isa(grid, CurvilinearGrid)
+                    if vel > 0
+                        upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    elseif vel < 0
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    end
+                end
+                fluxes_x[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]) * grid.face_area_x[i_glob, j_glob, k]
+            end
         end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
-        i_glob, j_glob = i_phys + ng, j_phys + ng
-        flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
-        C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+    # This loop is also safe to parallelize for the same reasons.
+    Threads.@threads for k in axes(C_out, 3)
+        for j_phys in 1:ny
+            for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
+        end
     end
 end
 
@@ -374,72 +383,79 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     v = state.v
     fluxes_y .= 0.0
 
-    @inbounds for k in axes(C_in, 3), i_phys in 1:nx
-        i_glob = i_phys + ng
-        # --- Interior Faces ---
-        for j_phys in 3:ny-1
-            j_glob = j_phys + ng
-            velocity = v[i_glob, j_glob, k]
-            if abs(velocity) < 1e-12; continue; end
+    # Here, we parallelize the loop over the vertical layers.
+    Threads.@threads for k in axes(C_in, 3)
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+            # --- Interior Faces ---
+            for j_phys in 3:ny-1
+                j_glob = j_phys + ng
+                velocity = v[i_glob, j_glob, k]
+                if abs(velocity) < 1e-12; continue; end
 
-            if isa(grid, CurvilinearGrid)
-                if velocity > 0 # Flow bottom->top
-                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
-                    if upstream_depth < D_crit; velocity = 0.0; end
-                else # Flow top->bottom
-                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
-                    if upstream_depth < D_crit; velocity = 0.0; end
+                if isa(grid, CurvilinearGrid)
+                    if velocity > 0 # Flow bottom->top
+                        upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    else # Flow top->bottom
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    end
                 end
-            end
 
-            donor_idx, receiver_idx = velocity >= 0 ? (j_glob - 1, j_glob) : (j_glob, j_glob - 1)
-            c_stencil = get_stencil_y(C_in, i_glob, donor_idx, k)
-            dy_donor = get_dy_at_face(grid, i_glob, j_glob)
-            a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
-            courant_abs = abs(velocity * dt / dy_donor)
-            if courant_abs > 1.0; courant_abs = 1.0; end
-            
-            integral_right, integral_left = if velocity >= 0
-                _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
-            else
-                _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
-            end
-
-            C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
-            C_face_low_order = C_in[i_glob, donor_idx, k]
-            c_up_far=C_in[i_glob, donor_idx - (velocity >= 0 ? 1 : -1), k]
-            c_up_near=C_in[i_glob, donor_idx, k]
-            c_down_near=C_in[i_glob, receiver_idx, k]
-            r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
-            r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
-            phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
-            C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
-            C_max = max(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
-            C_min = min(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
-            fluxes_y[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_y[i_glob, j_glob, k]
-        end
-
-        # --- Boundary Faces ---
-        for j_phys in [1, 2, ny, ny+1]
-            j_glob = j_phys + ng
-            vel = v[i_glob, j_glob, k]
-            if isa(grid, CurvilinearGrid)
-                if vel > 0
-                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
-                    if upstream_depth < D_crit; vel = 0.0; end
-                elseif vel < 0
-                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
-                    if upstream_depth < D_crit; vel = 0.0; end
+                donor_idx, receiver_idx = velocity >= 0 ? (j_glob - 1, j_glob) : (j_glob, j_glob - 1)
+                c_stencil = get_stencil_y(C_in, i_glob, donor_idx, k)
+                dy_donor = get_dy_at_face(grid, i_glob, j_glob)
+                a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
+                courant_abs = abs(velocity * dt / dy_donor)
+                if courant_abs > 1.0; courant_abs = 1.0; end
+                
+                integral_right, integral_left = if velocity >= 0
+                    _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
+                else
+                    _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
                 end
+
+                C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
+                C_face_low_order = C_in[i_glob, donor_idx, k]
+                c_up_far=C_in[i_glob, donor_idx - (velocity >= 0 ? 1 : -1), k]
+                c_up_near=C_in[i_glob, donor_idx, k]
+                c_down_near=C_in[i_glob, receiver_idx, k]
+                r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
+                r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
+                phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
+                C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
+                C_max = max(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
+                C_min = min(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
+                fluxes_y[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_y[i_glob, j_glob, k]
             end
-            fluxes_y[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]) * grid.face_area_y[i_glob, j_glob, k]
+
+            # --- Boundary Faces ---
+            for j_phys in [1, 2, ny, ny+1]
+                j_glob = j_phys + ng
+                vel = v[i_glob, j_glob, k]
+                if isa(grid, CurvilinearGrid)
+                    if vel > 0
+                        upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    elseif vel < 0
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    end
+                end
+                fluxes_y[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]) * grid.face_area_y[i_glob, j_glob, k]
+            end
         end
     end
 
-    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
-        i_glob, j_glob = i_phys + ng, j_phys + ng
-        flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
-        C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+    Threads.@threads for k in axes(C_out, 3)
+        for j_phys in 1:ny
+            for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
+        end
     end
 end
 

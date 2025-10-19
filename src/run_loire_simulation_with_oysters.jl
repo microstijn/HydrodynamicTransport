@@ -143,13 +143,12 @@ for loc in oyster_locations
 end
 
 oyster_tracers = (dissolved=:Virus_Dissolved, sorbed=:Virus_Sorbed)
-1800/60
+
 # --- 7. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 12 * 3600.0 # Run for 12 hours
+end_time = 96 * 3600.0 # Run for 12 hours
 #end_time = 30*10.0 # Run for 12 hours
-dt = floor(estimate_stable_timestep(hydro_data; advection_scheme=:TVD, start_time, end_time, dx_var="dx", dy_var="dy"))
-dt = 6
+dt = 30.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 output_directory = raw"D:\PreVir\loire_virus_sim_output"
 output_interval_seconds = 30 * 60.0
@@ -160,18 +159,23 @@ println("Total duration: $(end_time / 3600.0) hours")
 println("Time step (dt): $dt seconds")
 println("Output will be saved to: $output_directory")
 
+restart_file = raw"D:\PreVir\loire_virus_sim_output\state_t_271800.jld2"
+
 final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
+    use_adaptive_dt         = true,
+    cfl_max                 = 0.8,
+    dt_max                  = 120.0,
+    dt_min                  = 0.01,
+    dt_growth_factor        = 1.1,
     boundary_conditions     = bcs,
     sediment_params         = sediment_params,
     functional_interactions = functional_interactions,
-    virtual_oysters         = virtual_oysters,
-    oyster_tracers          = oyster_tracers,
     advection_scheme        = :TVD,
     D_crit                  = 0.05,
     output_dir              = output_directory,
     output_interval         = output_interval_seconds,
-    restart_from            = nothing
+    restart_from            = restart_file
 )
 
 # --- 9. Clean Up and Summarize ---

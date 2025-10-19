@@ -5,11 +5,101 @@ module UtilsModule
 export estimate_stable_timestep
 export create_hydrodynamic_data_from_file
 export lonlat_to_ij
+export calculate_max_cfl_term
 
+using Base.Threads
 using NCDatasets
 using Dates
 using ..HydrodynamicTransport.ModelStructs
 
+"""
+    calculate_max_cfl_term(state::State, grid::CurvilinearGrid)
+
+Scans the grid to find the maximum value of (|u|/dx + |v|/dy), which is the
+inverse of the Courant-limited timestep. This is used by the adaptive
+time-stepping algorithm to validate a completed step.
+
+This function is multithreaded for performance.
+
+# Arguments
+- `state::State`: The current model state, containing the velocity fields.
+- `grid::CurvilinearGrid`: The model grid, containing grid metrics.
+
+# Returns
+- `Float64`: The maximum CFL term found across all water cells in the grid.
+"""
+function calculate_max_cfl_term(state::State, grid::CurvilinearGrid)
+    u, v, w, pm, pn = state.u, state.v, state.w, grid.pm, grid.pn
+    ng, nx, ny, nz = grid.ng, grid.nx, grid.ny, grid.nz
+    
+    max_cfl_term = Threads.Atomic{Float64}(0.0)
+
+    Threads.@threads for j in 1:ny
+        for i in 1:nx
+            i_glob, j_glob = i + ng, j + ng
+            
+            if grid.mask_rho[i_glob, j_glob]
+                # Horizontal components (dx ≈ 1/pm, dy ≈ 1/pn)
+                # Use surface velocities as representative for the horizontal term
+                u_center = 0.5 * (u[i_glob, j_glob, nz] + u[i_glob+1, j_glob, nz])
+                v_center = 0.5 * (v[i_glob, j_glob, nz] + v[i_glob, j_glob+1, nz])
+                cfl_term_horiz = abs(u_center) * pm[i_glob, j_glob] + abs(v_center) * pn[i_glob, j_glob]
+
+                # Find the maximum vertical component in this column
+                max_cfl_term_vert = 0.0
+                for k in 1:nz
+                    dz = abs(grid.z_w[k+1] - grid.z_w[k])
+                    w_center = 0.5 * (w[i_glob, j_glob, k] + w[i_glob, j_glob, k+1])
+                    cfl_term_vert = abs(w_center) / dz
+                    if cfl_term_vert > max_cfl_term_vert
+                        max_cfl_term_vert = cfl_term_vert
+                    end
+                end
+                
+                # Total CFL term for this (i,j) location is the sum of horizontal and max vertical
+                total_cfl_term = cfl_term_horiz + max_cfl_term_vert
+                Threads.atomic_max!(max_cfl_term, total_cfl_term)
+            end
+        end
+    end
+    return max_cfl_term[]
+end
+
+# Add the corresponding 3D method for CartesianGrid
+function calculate_max_cfl_term(state::State, grid::CartesianGrid)
+    u, v, w = state.u, state.v, state.w
+    ng, (nx, ny, nz) = grid.ng, grid.dims
+    dx = grid.volume[ng+1,ng+1,1] / grid.face_area_x[ng+2,ng+1,1]
+    dy = grid.volume[ng+1,ng+1,1] / grid.face_area_y[ng+1,ng+2,1]
+    
+    max_cfl_term = Threads.Atomic{Float64}(0.0)
+
+    Threads.@threads for j in 1:ny
+        for i in 1:nx
+            i_glob, j_glob = i + ng, j + ng
+
+            if grid.mask[i_glob, j_glob, 1] # Check mask on one layer
+                u_center = 0.5 * (u[i_glob, j_glob, end] + u[i_glob+1, j_glob, end])
+                v_center = 0.5 * (v[i_glob, j_glob, end] + v[i_glob, j_glob+1, end])
+                cfl_term_horiz = abs(u_center) / dx + abs(v_center) / dy
+
+                max_cfl_term_vert = 0.0
+                for k in 1:nz
+                    dz = grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k]
+                    w_center = 0.5 * (w[i_glob, j_glob, k] + w[i_glob, j_glob, k+1])
+                    cfl_term_vert = abs(w_center) / dz
+                    if cfl_term_vert > max_cfl_term_vert
+                        max_cfl_term_vert = cfl_term_vert
+                    end
+                end
+
+                total_cfl_term = cfl_term_horiz + max_cfl_term_vert
+                Threads.atomic_max!(max_cfl_term, total_cfl_term)
+            end
+        end
+    end
+    return max_cfl_term[]
+end
 
 """
     estimate_stable_timestep(hydro_data; advection_scheme, start_time, end_time, ...)

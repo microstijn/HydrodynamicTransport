@@ -60,7 +60,7 @@ export rotate_velocities_to_geographic
 export run_simulation, run_and_store_simulation
 
 # Functions from UtilsModule.jl
-export estimate_stable_timestep, create_hydrodynamic_data_from_file, lonlat_to_ij
+export estimate_stable_timestep, create_hydrodynamic_data_from_file, lonlat_to_ij, calculate_max_cfl_term
 
 
 end # module HydrodynamicTransport

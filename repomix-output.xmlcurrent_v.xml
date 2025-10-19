@@ -1,0 +1,3786 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/BedExchangeModule.jl
+src/BoundaryConditionsModule.jl
+src/GridModule.jl
+src/HorizontalTransportModule.jl
+src/Hydrodynamics.jl
+src/HydrodynamicTransport.jl
+src/IntegrationTestsModule.jl
+src/ModelStructs.jl
+src/oyster_test.jl
+src/OysterModule.jl
+src/previr_SCRIPTING.jl
+src/PROFILING.jl
+src/run_loire_simulation_with_oysters.jl
+src/run_vortex_test.jl
+src/SCRIPTING_HYDRODYN.jl
+src/SettlingModule.jl
+src/SourceSinkModule.jl
+src/StateModule.jl
+src/TestCasesModule.jl
+src/TimeSteppingModule.jl
+src/UtilsModule.jl
+src/VectorOperationsModule.jl
+src/VerticalTransportModule.jl
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/BedExchangeModule.jl">
+# src/BedExchangeModule.jl
+
+module BedExchangeModule
+
+export bed_exchange!
+
+using ..HydrodynamicTransport.ModelStructs
+
+"""
+    bed_exchange!(state, grid, dt, deposition_fluxes, sediment_tracers)
+
+Handles the exchange of sediment between the bottom water layer and the seabed.
+
+This function performs two main actions for each sediment tracer:
+1.  **Deposition**: It takes the depositional flux from the settling module,
+    calculates the total deposited mass, and adds it to the `state.bed_mass`.
+2.  **Erosion**: It calculates an erosion flux (resuspension) based on parameters,
+    removes that mass from the `state.bed_mass`, and adds it back into the
+    bottom water cell's concentration.
+
+# Arguments
+- `state::State`: The model state, which is modified in-place.
+- `grid::AbstractGrid`: The computational grid.
+- `dt::Float64`: The time step duration.
+- `deposition_fluxes::Dict{Symbol, Array{Float64, 2}}`: The output from the `apply_settling!` function.
+- `sediment_tracers::Dict{Symbol, SedimentParams}`: A dictionary mapping sediment
+  tracer names to their parameters.
+
+# Returns
+- `nothing`: The function modifies `state.tracers` and `state.bed_mass` in-place.
+"""
+function bed_exchange!(state::State, grid::AbstractGrid, dt::Float64, deposition_fluxes::Dict{Symbol, Array{Float64, 2}}, sediment_tracers::Dict{Symbol, SedimentParams})
+    ng = grid.ng
+    nx, ny, _ = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
+
+    for (tracer_name, params) in sediment_tracers
+        if !haskey(state.tracers, tracer_name); continue; end
+
+        C = state.tracers[tracer_name]
+        bed = state.bed_mass[tracer_name]
+        deposition = deposition_fluxes[tracer_name]
+
+        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+            i_glob, j_glob = i_phys + ng, j_phys + ng
+            
+            # --- 1. Deposition ---
+            deposited_mass_per_area = deposition[i_glob, j_glob] * dt
+            bed[i_glob, j_glob] += deposited_mass_per_area
+
+            # --- 2. Erosion (Simplified) ---
+            # A more realistic model would calculate bottom shear stress here.
+            erosion_flux = params.erosion_rate # in kg/m^2/s
+            
+            # Ensure we don't erode more mass than is available on the bed
+            max_erodible_mass_per_area = bed[i_glob, j_glob]
+            actual_eroded_mass_per_area = min(erosion_flux * dt, max_erodible_mass_per_area)
+            
+            # Update the bed
+            bed[i_glob, j_glob] -= actual_eroded_mass_per_area
+            
+            # --- 3. Add eroded mass to the bottom water cell ---
+            bottom_cell_volume = grid.volume[i_glob, j_glob, 1]
+            if bottom_cell_volume > 1e-9
+                # Horizontal area of the cell from grid metrics pm and pn
+                cell_area = 1.0 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+                
+                # Change in concentration = (Mass per Area * Area) / Volume
+                dC = (actual_eroded_mass_per_area * cell_area) / bottom_cell_volume
+                C[i_glob, j_glob, 1] += dC
+            end
+        end
+    end
+end
+
+end # module BedExchangeModule
+</file>
+
+<file path="src/oyster_test.jl">
+# test/oyster_test.jl
+
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+using Revise
+using HydrodynamicTransport
+using Test
+
+
+# --- Explicitly import the function and structs we are testing ---
+using HydrodynamicTransport.OysterModule: update_oysters!
+
+@testset "Oyster Bioaccumulation Module" begin
+    println("Running unit tests for the OysterModule...")
+
+    # --- 1. Setup ---
+    ng = 2; nx, ny, nz = 1, 1, 1; dx, dy, dz = 1.0, 1.0, 1.0
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+    pm = ones(nx_tot, ny_tot) ./ dx; pn = ones(nx_tot, ny_tot) ./ dy
+    h = ones(nx_tot, ny_tot) .* dz; z_w = [-dz, 0.0]
+    volume = fill(dx * dy * dz, (nx_tot, ny_tot, nz))
+    grid = CurvilinearGrid(ng, nx, ny, nz,
+        zeros(nx_tot,ny_tot), zeros(nx_tot,ny_tot), zeros(nx_tot,ny_tot), zeros(nx_tot,ny_tot), zeros(nx_tot,ny_tot), zeros(nx_tot,ny_tot),
+        z_w, pm, pn, zeros(nx_tot,ny_tot), h, trues(nx_tot,ny_tot), trues(nx+1+2ng,ny+2ng), trues(nx+2ng,ny+1+2ng),
+        zeros(nx_tot+1,ny_tot,nz), zeros(nx_tot,ny_tot+1,nz), volume)
+
+    dissolved_tracer = :Virus_Dissolved
+    sorbed_tracer = :Virus_Sorbed
+    
+    oyster_params = OysterParams(
+        wdw = 0.5, ϵ_free = 0.5, ϵ_sorbed = 0.1, kdep_20 = 0.23, θ_dep = 1.07
+    )
+
+    # --- Test Cases ---
+    @testset "1. Filtration Rate Calculation (Indirect Test)" begin
+        state_opt = initialize_state(grid, (dissolved_tracer, sorbed_tracer))
+        state_opt.temperature .= 27.0; state_opt.salinity .= 15.0; state_opt.tss .= 10.0
+        state_opt.tracers[dissolved_tracer] .= 100.0
+        oyster_opt = VirtualOyster(1, 1, 1, oyster_params, OysterState(0.0))
+        update_oysters!(state_opt, grid, [oyster_opt], 3600.0, dissolved_tracer, sorbed_tracer)
+
+        state_temp = initialize_state(grid, (dissolved_tracer, sorbed_tracer))
+        state_temp.temperature .= 10.0; state_temp.salinity .= 15.0; state_temp.tss .= 10.0
+        state_temp.tracers[dissolved_tracer] .= 100.0
+        oyster_temp = VirtualOyster(1, 1, 1, oyster_params, OysterState(0.0))
+        update_oysters!(state_temp, grid, [oyster_temp], 3600.0, dissolved_tracer, sorbed_tracer)
+        
+        @test oyster_temp.state.c_oyster < oyster_opt.state.c_oyster
+    end
+
+    @testset "2. Uptake, Rejection, and Assimilation" begin
+        state = initialize_state(grid, (dissolved_tracer, sorbed_tracer))
+        state.temperature .= 27.0; state.salinity .= 15.0
+        state.tracers[dissolved_tracer] .= 100.0
+        state.tracers[sorbed_tracer] .= 50.0
+        
+        fr_l_day_base = 0.17 * (oyster_params.wdw^0.75) * 24.0
+
+        # Scenario 1: Optimal TSS
+        state.tss .= 10.0
+        oyster_optimal = VirtualOyster(1, 1, 1, oyster_params, OysterState(0.0))
+        update_oysters!(state, grid, [oyster_optimal], 86400.0, dissolved_tracer, sorbed_tracer)
+
+        # CORRECTED: The analytical calculation now correctly includes pseudofeces rejection for TSS=10.0
+        fpseudo_optimal = clamp((10.0 - oyster_params.tss_reject) / (oyster_params.tss_clog - oyster_params.tss_reject), 0.0, 1.0)
+        uptake_free = fr_l_day_base * 100.0 * oyster_params.ϵ_free
+        uptake_sorbed = fr_l_day_base * 50.0 * (1 - fpseudo_optimal) * oyster_params.ϵ_sorbed
+        dC_dt = (uptake_free + uptake_sorbed) / oyster_params.wdw
+        c_expected = 0.0 + dC_dt * 1.0
+        
+        @test oyster_optimal.state.c_oyster ≈ c_expected rtol=1e-5
+
+        # Scenario 2: High TSS
+        state.tss .= 60.0
+        oyster_high_tss = VirtualOyster(1, 1, 1, oyster_params, OysterState(0.0))
+        update_oysters!(state, grid, [oyster_high_tss], 86400.0, dissolved_tracer, sorbed_tracer)
+        
+        f_tss_high = 10.364 * log(60.0)^(-2.0477)
+        fr_l_day_high_tss = fr_l_day_base * f_tss_high
+        fpseudo_high = clamp((60.0 - oyster_params.tss_reject) / (oyster_params.tss_clog - oyster_params.tss_reject), 0.0, 1.0)
+
+        uptake_rate_pseudo = (fr_l_day_high_tss*100.0*oyster_params.ϵ_free + fr_l_day_high_tss*50.0*(1-fpseudo_high)*oyster_params.ϵ_sorbed)
+        dC_dt_pseudo = uptake_rate_pseudo / oyster_params.wdw
+        c_expected_pseudo = 0.0 + dC_dt_pseudo * 1.0
+
+        @test oyster_high_tss.state.c_oyster ≈ c_expected_pseudo rtol=1e-5
+        @test oyster_high_tss.state.c_oyster < oyster_optimal.state.c_oyster
+    end
+
+    @testset "3. Depuration (Elimination)" begin
+        state = initialize_state(grid, (dissolved_tracer, sorbed_tracer))
+        state.temperature .= 20.0
+        state.tracers[dissolved_tracer] .= 0.0
+        state.tracers[sorbed_tracer] .= 0.0
+        
+        initial_oyster_conc = 1000.0
+        oyster = VirtualOyster(1, 1, 1, oyster_params, OysterState(initial_oyster_conc))
+        
+        update_oysters!(state, grid, [oyster], 86400.0, dissolved_tracer, sorbed_tracer)
+        
+        k_dep = oyster_params.kdep_20
+        expected_final_conc = initial_oyster_conc - (k_dep * initial_oyster_conc * 1.0)
+        
+        @test oyster.state.c_oyster ≈ expected_final_conc rtol=1e-5
+    end
+end
+</file>
+
+<file path="src/OysterModule.jl">
+# src/OysterModule.jl
+
+module OysterModule
+
+export update_oysters!
+
+using ..HydrodynamicTransport.ModelStructs
+
+_f_temp(T) = exp(-0.006 * (T - 27.0)^2)
+
+function _f_salinity(S)
+    if S < 5.0; return 0.0;
+    elseif S <= 12.0; return 0.0926 * (S - 0.0139);
+    else; return 1.0;
+    end
+end
+
+function _f_tss(TSS)
+    if TSS < 4.0; return 0.1;
+    elseif TSS <= 25.0; return 1.0;
+    else; return 10.364 * log(TSS)^(-2.0477);
+    end
+end
+
+function update_oysters!(model_state::State, grid::AbstractGrid, virtual_oysters::Vector{VirtualOyster}, dt_seconds::Float64, dissolved_tracer::Symbol, sorbed_tracer::Symbol)
+    if isempty(virtual_oysters); return; end
+    
+    dt_days = dt_seconds / 86400.0
+
+    for oyster in virtual_oysters
+        i, j, k = oyster.i + grid.ng, oyster.j + grid.ng, oyster.k
+        p = oyster.params
+        
+        T = model_state.temperature[i, j, k]
+        S = model_state.salinity[i, j, k]
+        TSS = model_state.tss[i, j, k]
+        C_diss = model_state.tracers[dissolved_tracer][i, j, k]
+        C_sorb = model_state.tracers[sorbed_tracer][i, j, k]
+
+        scaling_factor = p.wdw^0.75
+        fr_l_per_hr = 0.17 * scaling_factor * _f_temp(T) * _f_salinity(S) * _f_tss(TSS)
+        fr_l_per_day = fr_l_per_hr * 24.0
+
+        fpseudo = 0.0
+        if TSS > p.tss_reject
+            fpseudo = (TSS - p.tss_reject) / (p.tss_clog - p.tss_reject)
+            fpseudo = clamp(fpseudo, 0.0, 1.0)
+        end
+
+        assimilated_free = fr_l_per_day * C_diss * p.ϵ_free
+        ingested_sorbed = fr_l_per_day * C_sorb * (1 - fpseudo)
+        assimilated_sorbed = ingested_sorbed * p.ϵ_sorbed
+        total_uptake_rate = assimilated_free + assimilated_sorbed
+
+        k_dep = p.kdep_20 * p.θ_dep^(T - 20.0)
+        total_elimination = k_dep * oyster.state.c_oyster
+
+        dCoyster_dt = (total_uptake_rate / p.wdw) - total_elimination
+        
+        new_c_oyster = oyster.state.c_oyster + dCoyster_dt * dt_days
+        oyster.state.c_oyster = max(0.0, new_c_oyster)
+    end
+end
+
+end # module OysterModule
+</file>
+
+<file path="src/PROFILING.jl">
+# --- 1. Set up the Environment ---
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+
+using Revise
+using HydrodynamicTransport
+using Profile
+
+
+# Import all necessary unexported functions for the simulation loop
+using HydrodynamicTransport.ModelStructs
+using HydrodynamicTransport.GridModule
+using HydrodynamicTransport.StateModule
+using HydrodynamicTransport.BoundaryConditionsModule
+using HydrodynamicTransport.HorizontalTransportModule
+using HydrodynamicTransport.VerticalTransportModule
+using HydrodynamicTransport.SourceSinkModule
+using HydrodynamicTransport.HydrodynamicsModule
+
+println("--- Performance Profiling Script for HydrodynamicTransport.jl ---")
+println("This script will run a simulation and collect performance data.")
+println("The output will show where the model spends the most time.\n")
+
+
+# ==============================================================================
+# --- 2. Define the Simulation Function to be Profiled ---
+# ==============================================================================
+
+# We wrap the main loop in a function. This is the target for our profiler.
+function run_for_profiling(grid, state, sources, bcs, dt, end_time, advection_scheme)
+    
+    time_range = 0.0:dt:end_time
+    
+    for time in time_range
+        if time == 0.0; continue; end
+        state.time = time
+
+        # Run one time step with the full sequence of operations
+        apply_boundary_conditions!(state, grid, bcs)
+        update_hydrodynamics_placeholder!(state, grid, time)
+        horizontal_transport!(state, grid, dt, advection_scheme)
+        vertical_transport!(state, grid, dt)
+        source_sink_terms!(state, grid, sources, time, dt)
+    end
+    
+    return state
+end
+
+
+# ==============================================================================
+# --- 3. Setup a Realistic Test Case ---
+# ==============================================================================
+
+println("Setting up a realistic test case for profiling...")
+
+# A larger grid gives more meaningful performance results
+ nx, ny, nz = 150, 150, 10
+ ng = 2
+
+# Initialize grid and state
+grid = initialize_cartesian_grid(nx, ny, nz, 1500.0, 1500.0, 100.0; ng=ng);
+state = initialize_state(grid, (:C,));
+
+# Define some sources and boundaries
+sources = [PointSource(i=25, j=75, k=1, tracer_name=:C, influx_rate=(t)->100.0)];
+bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West)];
+
+# Simulation parameters
+ dt = 0.5
+ end_time = 50.0 # Run for a short duration to keep profiling manageable
+
+
+# ==============================================================================
+# --- 4. Run and Analyze Profiles ---
+# ==============================================================================
+
+# --- Profile the :TVD Scheme ---
+println("\n--- Profiling Simulation with :TVD Advection Scheme ---")
+# First run is for JIT compilation to warm up the code
+# --- FIX: Corrected argument order ---
+run_for_profiling(grid, deepcopy(state), sources, bcs, dt, 1.0, :TVD);
+
+# Clear any previous profiling data and run the profiler
+Profile.clear()
+# --- FIX: Corrected argument order ---
+@profile run_for_profiling(grid, deepcopy(state), sources, bcs, dt, end_time, :TVD);
+
+println("--- Results for :TVD Scheme ---")
+# Print the text-based profile report
+Profile.print(format=:flat, sortedby=:count, mincount=10)
+
+
+# --- Profile the :UP3 Scheme ---
+println("\n\n--- Profiling Simulation with :UP3 Advection Scheme ---")
+# First run for JIT compilation
+# --- FIX: Corrected argument order ---
+run_for_profiling(grid, deepcopy(state), sources, bcs, dt, 1.0, :UP3);
+
+# Clear profiling data and run again
+Profile.clear()
+# --- FIX: Corrected argument order ---
+@profile run_for_profiling(grid, deepcopy(state), sources, bcs, dt, end_time, :UP3);
+
+println("--- Results for :UP3 Scheme ---")
+Profile.print(format=:flat, sortedby=:count, mincount=10)
+
+
+# ==============================================================================
+# --- 5. How to Interpret the Results ---
+# ==============================================================================
+
+println("""
+
+--- How to Interpret the Profiling Results ---
+
+1.  **The Output Format:** The list shows a "stack trace" of function calls. The number on the left is the number of "samples" collected while the program was executing code within that function and any functions it called. A higher number means more time was spent there.
+
+2.  **Identifying Hotspots:** Look for the lines with the highest sample counts at the lowest indentation levels. These are your primary "hotspots." You should see `horizontal_transport!`, `vertical_transport!`, etc., near the top.
+
+3.  **Comparing Schemes:** Compare the total samples for `run_for_profiling` between the TVD and UP3 runs. More importantly, look at the samples within `horizontal_transport!` and specifically within `advect_x_tvd!` vs. `advect_x_up3!`. This will give you a direct measure of their relative cost.
+
+4.  **Memory Allocations (Indirect):** High sample counts inside garbage collection (`gc.c`) functions are a red flag for excessive memory allocation. Our previous optimizations should have minimized this, but it's always good to check.
+
+5.  **(Optional) Visual Profiling:** For a much more intuitive view, run this script in an interactive Julia session and then use `ProfileView`.
+    - Run the script.
+    - After the TVD profile, type `using ProfileView; ProfileView.view()`
+    - After the UP3 profile, type `Profile.clear()` then rerun the `@profile` line for UP3, then `ProfileView.view()` again.
+""")
+</file>
+
+<file path="src/run_loire_simulation_with_oysters.jl">
+# run_loire_simulation.jl
+
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+using Revise
+using HydrodynamicTransport
+using NCDatasets
+using UnicodePlots
+
+println("--- HydrodynamicTransport.jl: Loire Estuary Sorption, Sedimentation, and Oyster Simulation ---")
+
+# --- 1. Data Configuration ---
+# IMPORTANT: Update this path to the location of your NetCDF file.
+loire_filepath = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
+
+println("Autodetecting variables from: $loire_filepath")
+hydro_data = create_hydrodynamic_data_from_file(loire_filepath)
+
+# --- 2. Grid and State Initialization ---
+println("Connecting to NetCDF file...")
+ds = NCDataset(loire_filepath)
+
+println("Initializing Curvilinear Grid...")
+grid = initialize_curvilinear_grid(loire_filepath)
+
+println("Initializing State with Dissolved and Sorbed tracers...")
+tracer_names = (:Virus_Dissolved, :Virus_Sorbed)
+sediment_tracer_list = [:Virus_Sorbed]
+state = initialize_state(grid, ds, tracer_names; sediment_tracers=sediment_tracer_list)
+
+# Set a uniform background TSS concentration (e.g., 10.0 mg/L, which is g/m^3)
+# A real simulation might read this from the NetCDF file if available.
+state.tss .= 10.0
+# Also set uniform Temp and Salinity for the oyster model if they are not in the hydro_data
+if !haskey(hydro_data.var_map, :temp); state.temperature .= 15.0; end
+if !haskey(hydro_data.var_map, :salt); state.salinity .= 25.0; end
+
+
+# --- 3. Source Configuration ---
+println("Configuring point sources for dissolved virus...")
+sources = PointSource[]
+source_locations = [
+    (name = "Nantes",        lon = -1.549464,  lat = 47.197319),
+    (name = "Saint-Nazaire", lon = -2.28,      lat = 47.27),
+    (name = "Cordemais",     lon = -1.97,      lat = 47.28)
+]
+
+for loc in source_locations
+    i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
+    if i !== nothing && j !== nothing
+        println("  -> Source '$(loc.name)' placed at grid indices (i=$i, j=$j)")
+        push!(sources, PointSource(i=i, j=j, k=grid.nz, tracer_name=:Virus_Dissolved, influx_rate=(t)->1.0e10, relocate_if_dry=true))
+    else
+        println("  -> Warning: Could not find grid indices for source '$(loc.name)'.")
+    end
+end
+
+# --- 4. Define Sediment Parameters for the Sorbed Tracer ---
+println("Defining sediment parameters for :Virus_Sorbed...")
+sediment_params = Dict(
+    :Virus_Sorbed => SedimentParams(ws = 0.0005, erosion_rate = 1e-7, tau_ce = 0.1)
+)
+
+# --- 5. Define the Adsorption/Desorption Functional Interaction ---
+println("Defining adsorption-desorption interaction function...")
+function implicit_adsorption_desorption(concentrations, environment, dt)
+    C_diss_old = max(0.0, concentrations[:Virus_Dissolved])
+    C_sorb_old = max(0.0, concentrations[:Virus_Sorbed])
+    TSS = environment.TSS; Kd = 0.2; transfer_rate = 0.0001
+    C_total = C_diss_old + C_sorb_old
+    if C_total <= 1e-12; return Dict(:Virus_Dissolved => 0.0, :Virus_Sorbed => 0.0); end
+    alpha = dt * transfer_rate; beta = Kd * TSS
+    numerator = C_sorb_old + alpha * beta * C_total
+    denominator = 1.0 + alpha * (1.0 + beta)
+    C_sorb_new = numerator / denominator
+    delta_C = C_sorb_new - C_sorb_old
+    if delta_C > 0; delta_C = min(delta_C, C_diss_old); else; delta_C = max(delta_C, -C_sorb_old); end
+    return Dict(:Virus_Dissolved => -delta_C, :Virus_Sorbed => +delta_C)
+end
+
+virus_interaction = FunctionalInteraction(
+    affected_tracers = [:Virus_Dissolved, :Virus_Sorbed],
+    interaction_function = implicit_adsorption_desorption
+)
+
+
+# decay
+
+function create_decay_interaction(params::DecayParams)
+    function decay_function(concentrations, environment, dt)
+        C_old = max(0.0, concentrations[params.tracer_name])
+        if C_old <= 1e-12; return Dict(params.tracer_name => 0.0); end
+        T = environment.T
+        k_temp = if params.temp_theta > 1.0 && !isnan(T)
+            params.base_rate * params.temp_theta^(T - params.temp_ref)
+        else
+            params.base_rate
+        end
+        UVB = environment.UVB
+        k_light = if params.light_coeff > 0.0 && !isnan(UVB)
+            params.light_coeff * UVB
+        else
+            0.0
+        end
+        k_total = k_temp + k_light
+        delta_C = -k_total * C_old * dt
+        delta_C = max(delta_C, -C_old)
+        return Dict(params.tracer_name => delta_C)
+    end
+    return FunctionalInteraction(
+        affected_tracers = [params.tracer_name],
+        interaction_function = decay_function
+    )
+end
+
+decay_params = DecayParams(
+    tracer_name = :Virus_Dissolved,
+    base_rate = 1.0 / (3 * 24 * 3600.0), # 3-day half-life
+    temp_theta = 1.07 # Decay is faster in warmer water
+)
+
+decay_interaction = create_decay_interaction(decay_params)
+
+functional_interactions = [virus_interaction, decay_interaction]
+
+# --- 6. Oyster Configuration ---
+println("Configuring virtual oysters...")
+oyster_params = OysterParams() # Use default biological parameters
+oyster_locations = [
+    (name="La Couplasse", lon=-2.0322, lat=47.0263) # 47°1'34.7"N, 2°1'55.9"W
+]
+
+virtual_oysters = VirtualOyster[]
+for loc in oyster_locations
+    i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
+    if i !== nothing && j !== nothing
+        println("  -> Oyster farm '$(loc.name)' placed at grid indices (i=$i, j=$j)")
+        # Place oysters in the surface layer (k=grid.nz) with an initial concentration of 0.0
+        push!(virtual_oysters, VirtualOyster(i, j, grid.nz, oyster_params, OysterState(0.0)))
+    else
+        println("  -> Warning: Could not find grid indices for oyster farm '$(loc.name)'.")
+    end
+end
+
+oyster_tracers = (dissolved=:Virus_Dissolved, sorbed=:Virus_Sorbed)
+1800/60
+# --- 7. Simulation and Output Parameters ---
+start_time = 0.0
+end_time = 12 * 3600.0 # Run for 12 hours
+#end_time = 30*10.0 # Run for 12 hours
+dt = floor(estimate_stable_timestep(hydro_data; advection_scheme=:TVD, start_time, end_time, dx_var="dx", dy_var="dy"))
+dt = 6
+bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
+output_directory = raw"D:\PreVir\loire_virus_sim_output"
+output_interval_seconds = 30 * 60.0
+
+# --- 8. Run the Simulation ---
+println("\n--- Starting simulation ---")
+println("Total duration: $(end_time / 3600.0) hours")
+println("Time step (dt): $dt seconds")
+println("Output will be saved to: $output_directory")
+
+final_state = run_simulation(
+    grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
+    boundary_conditions     = bcs,
+    sediment_params         = sediment_params,
+    functional_interactions = functional_interactions,
+    virtual_oysters         = virtual_oysters,
+    oyster_tracers          = oyster_tracers,
+    advection_scheme        = :TVD,
+    D_crit                  = 0.05,
+    output_dir              = output_directory,
+    output_interval         = output_interval_seconds,
+    restart_from            = nothing
+)
+
+# --- 9. Clean Up and Summarize ---
+close(ds)
+
+println("\n--- Simulation Complete ---")
+println("Final simulation time: $(round(final_state.time / 3600.0, digits=2)) hours.")
+
+# Correct mass calculation
+ng = grid.ng; nx = grid.nx; ny = grid.ny
+phys_view_3d(tracer_arr) = view(tracer_arr, ng+1:nx+ng, ng+1:ny+ng, :)
+phys_view_2d(bed_arr) = view(bed_arr, ng+1:nx+ng, ng+1:ny+ng)
+total_dissolved_mass = sum(phys_view_3d(final_state.tracers[:Virus_Dissolved]) .* phys_view_3d(grid.volume))
+total_sorbed_water_mass = sum(phys_view_3d(final_state.tracers[:Virus_Sorbed]) .* phys_view_3d(grid.volume))
+cell_areas = 1.0 ./ (phys_view_2d(grid.pm) .* phys_view_2d(grid.pn))
+total_bed_mass = sum(phys_view_2d(final_state.bed_mass[:Virus_Sorbed]) .* cell_areas)
+
+println("\n--- Final Mass Balance ---")
+println("Total dissolved virus mass: ", total_dissolved_mass)
+println("Total sorbed virus mass in water: ", total_sorbed_water_mass)
+println("Total sorbed virus mass in bed: ", total_bed_mass)
+println("Total virus mass in system: ", total_dissolved_mass + total_sorbed_water_mass + total_bed_mass)
+
+println("\n--- Final Oyster Concentrations ---")
+for (idx, oyster) in enumerate(virtual_oysters)
+    println("$(oyster_locations[idx].name): $(oyster.state.c_oyster) vg/g")
+end
+</file>
+
+<file path="src/run_vortex_test.jl">
+# run_vortex_test.jl
+
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+using Revise
+using HydrodynamicTransport
+using Test
+using UnicodePlots
+using ProgressMeter
+using Base: @kwdef # Needed for the local struct definition
+
+# --- Explicitly import unexported functions needed for the custom loop ---
+using HydrodynamicTransport.BoundaryConditionsModule: apply_boundary_conditions!
+using HydrodynamicTransport.HorizontalTransportModule: horizontal_transport!
+using HydrodynamicTransport.VerticalTransportModule: vertical_transport!
+using HydrodynamicTransport.SourceSinkModule: source_sink_terms!
+using HydrodynamicTransport.SettlingModule: apply_settling!
+using HydrodynamicTransport.BedExchangeModule: bed_exchange!
+
+# --- NEW: Local definitions for Decay physics, as they are not yet in the main package ---
+@kwdef struct DecayParams
+    tracer_name::Symbol
+    base_rate::Float64 = 0.0
+    temp_ref::Float64 = 20.0
+    temp_theta::Float64 = 1.0
+    light_coeff::Float64 = 0.0
+end
+
+function create_decay_interaction(params::DecayParams)
+    function decay_function(concentrations, environment, dt)
+        C_old = max(0.0, concentrations[params.tracer_name])
+        if C_old <= 1e-12; return Dict(params.tracer_name => 0.0); end
+        
+        T = environment.T
+        k_temp = if params.temp_theta > 1.0 && !isnan(T)
+            params.base_rate * params.temp_theta^(T - params.temp_ref)
+        else
+            params.base_rate
+        end
+        
+        UVB = environment.UVB
+        k_light = if params.light_coeff > 0.0 && !isnan(UVB)
+            params.light_coeff * UVB
+        else
+            0.0
+        end
+        
+        k_total = k_temp + k_light
+        delta_C = -k_total * C_old * dt
+        delta_C = max(delta_C, -C_old)
+        return Dict(params.tracer_name => delta_C)
+    end
+    return FunctionalInteraction(
+        affected_tracers = [params.tracer_name],
+        interaction_function = decay_function
+    )
+end
+# ------------------------------------------------------------------------------------
+
+println("--- HydrodynamicTransport.jl: Full Integration Test with Vortex Dynamics ---")
+
+# --- 1. Custom Curvilinear Grid Generation ---
+println("Generating custom 50x50x5 curvilinear grid...")
+ng = 2
+nx, ny, nz = 50, 50, 5
+Lx, Ly, Lz = 1000.0, 1000.0, 20.0
+dx, dy = Lx / nx, Ly / ny
+nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+
+pm = ones(Float64, nx_tot, ny_tot) ./ dx
+pn = ones(Float64, nx_tot, ny_tot) ./ dy
+h = ones(Float64, nx_tot, ny_tot) .* Lz
+zeros_arr = zeros(Float64, nx_tot, ny_tot)
+trues_arr_rho = trues(nx_tot, ny_tot)
+trues_arr_u = trues(nx + 1 + 2*ng, ny + 2*ng)
+trues_arr_v = trues(nx + 2*ng, ny + 1 + 2*ng)
+z_w = collect(range(-Lz, 0, length=nz+1))
+
+volume = zeros(Float64, nx_tot, ny_tot, nz)
+face_area_x = zeros(Float64, nx_tot + 1, ny_tot, nz)
+face_area_y = zeros(Float64, nx_tot, ny_tot + 1, nz)
+
+for k in 1:nz
+    dz = abs(z_w[k+1] - z_w[k])
+    volume[:, :, k] .= dx * dy * dz
+    face_area_x[:, :, k] .= dy * dz
+    face_area_y[:, :, k] .= dx * dz
+end
+
+grid = CurvilinearGrid(ng, nx, ny, nz, zeros_arr, zeros_arr, zeros_arr, zeros_arr, zeros_arr, zeros_arr, 
+                       z_w, pm, pn, zeros_arr, h,
+                       trues_arr_rho, trues_arr_u, trues_arr_v,
+                       face_area_x, face_area_y, volume)
+
+# --- 2. Custom Hydrodynamics: Steady-State Vortex ---
+println("Generating steady-state vortex flow field...")
+function generate_vortex_flow!(state::State, grid::CurvilinearGrid)
+    center_x, center_y = grid.nx * dx / 2.0, grid.ny * dy / 2.0
+    omega = 0.001
+    for k in 1:grid.nz, j in 1:grid.ny, i in 1:(grid.nx + 1)
+        x_face = (i - 0.5) * dx
+        y_center = (j - 0.5) * dy
+        state.u[i+ng, j+ng, k] = -omega * (y_center - center_y)
+    end
+    for k in 1:grid.nz, j in 1:(grid.ny + 1), i in 1:grid.nx
+        x_center = (i - 0.5) * dx
+        y_face = (j - 0.5) * dy
+        state.v[i+ng, j+ng, k] = omega * (x_center - center_x)
+    end
+end
+
+# --- 3. State Initialization ---
+println("Initializing state with three interacting tracers...")
+tracer_names = (:Dye, :Reagent, :Sediment)
+sediment_tracer_list = [:Sediment]
+state = initialize_state(grid, tracer_names; sediment_tracers=sediment_tracer_list)
+
+# --- 4. Physics Configuration ---
+println("Configuring sources, interactions, and sediment parameters...")
+sources = [
+    PointSource(i=10, j=25, k=nz, tracer_name=:Dye, influx_rate=(t)->1.0e4),
+    PointSource(i=22, j=25, k=nz, tracer_name=:Reagent, influx_rate=(t)->1.0e4)
+]
+
+sediment_params = Dict(
+    :Sediment => SedimentParams(ws = 0.002, erosion_rate = 1e-8)
+)
+
+decay_interaction = create_decay_interaction(DecayParams(
+    tracer_name = :Reagent,
+    base_rate = 1.0 / (2 * 3600.0) # 2-hour half-life
+))
+
+function dye_reacts_with_reagent(concentrations, environment, dt)
+    k_react = 1e-3
+    C_dye = max(0.0, concentrations[:Dye])
+    C_reagent = max(0.0, concentrations[:Reagent])
+    delta_C = min(C_dye, C_reagent, k_react * C_dye * C_reagent * dt)
+    return Dict(:Dye => -delta_C, :Reagent => -delta_C, :Sediment => +delta_C)
+end
+
+reaction_interaction = FunctionalInteraction(
+    affected_tracers = [:Dye, :Reagent, :Sediment],
+    interaction_function = dye_reacts_with_reagent
+)
+functional_interactions = [decay_interaction, reaction_interaction]
+
+# --- 5. Custom Simulation Loop ---
+println("Starting custom simulation loop...")
+start_time = 0.0
+dt = 14.0
+end_time = 6 * 3600.0
+time_range = start_time:dt:end_time
+bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
+
+initial_reagent_mass = sum(state.tracers[:Reagent] .* grid.volume)
+total_source_mass_added = 0.0
+
+
+@showprogress "Simulating..." for time in time_range
+    global total_source_mass_added
+    if time == start_time; continue; end
+    state.time = time
+
+    apply_boundary_conditions!(state, grid, bcs)
+    generate_vortex_flow!(state, grid)
+    horizontal_transport!(state, grid, dt, :TVD, 0.0, bcs)
+    vertical_transport!(state, grid, dt)
+    deposition = apply_settling!(state, grid, dt, sediment_params)
+    bed_exchange!(state, grid, dt, deposition, sediment_params)
+    source_sink_terms!(state, grid, sources, functional_interactions, time, dt, 0.0)
+
+    total_source_mass_added += (sources[1].influx_rate(time) + sources[2].influx_rate(time)) * dt
+end
+
+println("\n--- Simulation Complete ---")
+
+# --- 6. Verification and Visualization ---
+println("Running verification tests...")
+@testset "Vortex Simulation Verification" begin
+    final_sediment_water = sum(state.tracers[:Sediment] .* grid.volume)
+    final_sediment_bed = sum(state.bed_mass[:Sediment]) * (dx*dy)
+    @test final_sediment_water > 0
+    @test final_sediment_bed > 0
+    final_reagent_mass = sum(state.tracers[:Reagent] .* grid.volume)
+    @test final_reagent_mass < initial_reagent_mass + total_source_mass_added
+    total_final_mass = sum(sum(t .* grid.volume) for t in values(state.tracers)) + sum(sum(b) for b in values(state.bed_mass)) * (dx*dy)
+    @test total_final_mass <= total_source_mass_added + 1e-9
+end
+
+println("\n--- Final Tracer Distributions (Surface Layer) ---")
+
+function plot_tracer(tracer_array, title)
+    surface_data = tracer_array[ng+1:nx+ng, ng+1:ny+ng, nz]
+    println(heatmap(surface_data', title=title, colormap=:viridis, width=50))
+end
+
+plot_tracer(state.tracers[:Dye], "Final Dye Concentration")
+plot_tracer(state.tracers[:Reagent], "Final Reagent Concentration")
+plot_tracer(state.tracers[:Sediment], "Final Sediment Concentration (in water)")
+
+println("\n--- Test script finished successfully! ---")
+</file>
+
+<file path="src/SettlingModule.jl">
+# src/SettlingModule.jl
+
+module SettlingModule
+
+export apply_settling!
+
+using ..HydrodynamicTransport.ModelStructs
+using LinearAlgebra
+
+"""
+    apply_settling!(state::State, grid::AbstractGrid, dt::Float64, sediment_tracers::Dict{Symbol, SedimentParams})
+
+Applies sediment settling using a numerically stable implicit scheme.
+
+This function solves the 1D vertical advection equation for settling.
+The implicit, first-order upwind formulation is used:
+(1 + ν_k) * C_k^{n+1} - ν_k * C_{k+1}^{n+1} = C_k^n
+where ν is the Courant number (ws * dt / dz).
+
+This creates a bidiagonal system that is solved for each water column.
+The flux of sediment out of the bottom-most water cell is calculated and
+returned as the deposition flux to the bed.
+
+# Arguments
+- `state::State`: The model state, modified in-place.
+- `grid::AbstractGrid`: The computational grid.
+- `dt::Float64`: The time step duration.
+- `sediment_tracers`: A Dict mapping tracer symbols to their parameters.
+
+# Returns
+- `deposition_fluxes::Dict{Symbol, Array{Float64, 2}}`: A dictionary mapping
+  each sediment tracer to a 2D array of deposition fluxes (in mass/m^2/s)
+  at the seabed for each (i,j) location.
+"""
+function apply_settling!(state::State, grid::AbstractGrid, dt::Float64, sediment_tracers::Dict{Symbol, SedimentParams})
+    if isempty(sediment_tracers); return Dict(); end
+
+    ng = grid.ng
+    nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
+    if nz <= 1; return Dict(); end
+
+    deposition_fluxes = Dict{Symbol, Array{Float64, 2}}()
+
+    for (tracer_name, params) in sediment_tracers
+        if !haskey(state.tracers, tracer_name); continue; end
+
+        C = state.tracers[tracer_name]
+        ws = params.ws
+        deposition_fluxes[tracer_name] = zeros(Float64, nx + 2*ng, ny + 2*ng)
+
+        # Pre-allocate vectors for the bidiagonal system
+        b = Vector{Float64}(undef, nz)     # main diagonal
+        c = Vector{Float64}(undef, nz - 1) # super-diagonal (influence from cell k+1 on k)
+        d = Vector{Float64}(undef, nz)     # RHS (current concentration C_n)
+
+        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+            i_glob, j_glob = i_phys + ng, j_phys + ng
+
+            # --- 1. Construct the bidiagonal system for the column ---
+            for k in 1:nz
+                dz_k = isa(grid, CartesianGrid) ? grid.volume[i_glob, j_glob, k] / grid.face_area_z[i_glob, j_glob, k] : abs(grid.z_w[k+1] - grid.z_w[k])
+                courant_k = ws * dt / dz_k
+
+                b[k] = 1.0 + courant_k
+                if k < nz
+                    # Influence of cell k+1 (above) on cell k (below)
+                    c[k] = -courant_k
+                end
+                d[k] = C[i_glob, j_glob, k]
+            end
+            
+            # --- 2. Solve the system ---
+            A = Bidiagonal(b, c, :U) # Upper bidiagonal system
+            solution = A \ d
+            
+            # --- 3. Store the result back into the tracer array ---
+            view(C, i_glob, j_glob, :) .= solution
+
+            # --- 4. Calculate deposition flux from the new bottom cell concentration ---
+            new_C_bottom = solution[1]
+            deposition_fluxes[tracer_name][i_glob, j_glob] = ws * new_C_bottom
+        end
+    end
+
+    return deposition_fluxes
+end
+
+end # module SettlingModule
+</file>
+
+<file path="src/IntegrationTestsModule.jl">
+# src/IntegrationTests.jl
+
+module IntegrationTestsModule
+
+export run_integration_tests
+
+using Test
+using ..ModelStructs
+using ..GridModule
+using ..StateModule
+using ..TimeSteppingModule
+using ..HydrodynamicsModule
+using ..VectorOperationsModule # Added for the new test
+using NCDatasets
+
+function run_integration_tests()
+    @testset "Integration Tests with Real Data (Norway ROMS)" begin
+        # Configuration
+        netcdf_filepath = "https://ns9081k.hyrax.sigma2.no/opendap/K160_bgc/Sim2/ocean_his_0001.nc"
+        variable_map = Dict(:u => "u", :v => "v", :time => "ocean_time")
+        hydro_data = HydrodynamicData(netcdf_filepath, variable_map)
+
+        @testset "Grid Ingestion and Data Loading" begin
+            @info "Running Integration Test: Grid Ingestion..."
+            ds = NCDataset(netcdf_filepath)
+            
+            grid = initialize_curvilinear_grid(hydro_data.filepath)
+            state = initialize_state(grid, ds, (:C,))
+
+            update_hydrodynamics!(state, grid, ds, hydro_data, 0.0)
+            close(ds)
+
+            @test any(!iszero, state.u)
+            @test any(!iszero, state.v)
+        end
+
+        @testset "Velocity Rotation with Real Data" begin
+            @info "Running Integration Test: Velocity Rotation..."
+            ds = NCDataset(netcdf_filepath)
+            
+            grid = initialize_curvilinear_grid(hydro_data.filepath)
+            state = initialize_state(grid, ds, ()) # No tracers needed
+
+            # Load the first time step of velocity data
+            update_hydrodynamics!(state, grid, ds, hydro_data, 0.0)
+            close(ds)
+
+            # Ensure we have velocities to work with
+            @test any(!iszero, state.u)
+            @test any(!iszero, state.v)
+
+            # Perform the rotation
+            u_east, v_north = rotate_velocities_to_geographic(grid, state.u, state.v)
+
+            # The output should also be populated
+            @test any(!iszero, u_east)
+            @test any(!iszero, v_north)
+
+            # Check that for a known non-zero angle, the rotation actually changed the vector.
+            # We pick a point in the middle of the domain.
+            i, j, k = 100, 150, 1
+            if grid.angle[i,j] != 0.0
+                u_rho_point = 0.5 * (state.u[i, j, k] + state.u[i+1, j, k])
+                @test u_east[i, j, k] != u_rho_point
+            end
+        end
+
+        @testset "Mass Conservation with Point Source" begin
+            @info "Running Integration Test: Mass Conservation..."
+            ds = NCDataset(netcdf_filepath)
+            
+            grid_full = initialize_curvilinear_grid(hydro_data.filepath)
+            
+            # Initialize a 2D state using the surface layer of the dataset dimensions
+            grid_2d = CurvilinearGrid(
+                grid_full.nx, grid_full.ny, 1,
+                grid_full.lon_rho, grid_full.lat_rho, grid_full.lon_u, grid_full.lat_u,
+                grid_full.lon_v, grid_full.lat_v, grid_full.z_w[end-1:end],
+                grid_full.pm, grid_full.pn, grid_full.angle, grid_full.h,
+                grid_full.mask_rho, grid_full.mask_u, grid_full.mask_v,
+                grid_full.face_area_x[:,:,end:end], 
+                grid_full.face_area_y[:,:,end:end],
+                grid_full.volume[:,:,end:end]
+            )
+            state_2d = initialize_state(grid_2d, (:TestTracer,))
+
+            initial_mass = sum(state_2d.tracers[:TestTracer] .* grid_2d.volume)
+            @test initial_mass == 0.0
+
+            source_rate = 1.0e6
+            sources = [PointSource(i=100, j=150, k=1, tracer_name=:TestTracer, influx_rate=(t)->source_rate)]
+            
+            start_time = 0.0
+            dt = 120.0
+            end_time = 10 * dt
+
+            final_state = run_simulation(grid_2d, state_2d, sources, ds, hydro_data, start_time, end_time, dt)
+            close(ds)
+            
+            final_mass = sum(final_state.tracers[:TestTracer] .* grid_2d.volume)
+            
+            expected_mass = source_rate * end_time
+            
+            @test isapprox(final_mass, expected_mass, rtol=0.01)
+            # Check that the monotonic scheme isn't creating new mass
+            @test final_mass <= expected_mass * (1 + 1e-9) 
+        end
+    end
+end
+
+end # module IntegrationTestsModule
+</file>
+
+<file path="src/BoundaryConditionsModule.jl">
+# src/BoundaryConditionsModule.jl
+
+module BoundaryConditionsModule
+
+export apply_boundary_conditions!, apply_intermediate_boundary_conditions!
+
+using ..HydrodynamicTransport.ModelStructs
+
+"""
+    apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition})
+
+Applies a set of boundary conditions to the model state by updating values in the ghost cells.
+
+This function modifies the `state` object in-place. It iterates through the domain boundaries
+and applies the specified conditions from the `bcs` vector. The logic is structured to
+handle different boundary types (`OpenBoundary`, `RiverBoundary`, `TidalBoundary`) and to
+correctly manage inflow and outflow conditions.
+
+The process is performed in two passes:
+1.  **East-West boundaries**: Updates ghost cells on the west and east sides.
+2.  **North-South boundaries**: Updates ghost cells on the north and south sides. This two-pass
+    approach ensures that corner cells are handled correctly.
+
+For each boundary, the function determines the appropriate action based on the velocity
+normal to that boundary:
+-   **Outflow**: A zero-gradient condition is applied, where the ghost cell values are set
+    equal to the values in the adjacent physical domain cell.
+-   **Inflow**: Ghost cell values are set according to the specific boundary condition rule.
+    For example, a `TidalBoundary` might specify time-varying tracer concentrations, while a
+    simple `OpenBoundary` might default to a concentration of zero.
+
+# Arguments
+- `state::State`: The current state of the model, which will be modified.
+- `grid::AbstractGrid`: The computational grid, providing dimensions and ghost cell information.
+- `bcs::Vector{<:BoundaryCondition}`: A vector of boundary condition objects to be applied.
+
+# Returns
+- `nothing`: The function modifies the `state` argument in-place.
+"""
+function apply_boundary_conditions!(state::State, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition})
+    ng = grid.ng
+    nx, ny, _ = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+
+    # --- Create helpers to find the most specific BC for a given side ---
+    find_river_bc(side, i) = findfirst(b -> isa(b, RiverBoundary) && b.side == side && i in b.indices, bcs)
+    find_tidal_bc(side) = findfirst(b -> isa(b, TidalBoundary) && b.side == side, bcs)
+    find_open_bc(side) = findfirst(b -> isa(b, OpenBoundary) && b.side == side, bcs)
+
+    # --- Pass 1: Process East-West sides ---
+    # This pass iterates over the physical y-dimension of the relevant arrays.
+    for k in axes(state.u, 3), j_phys in 1:ny
+        j_glob = j_phys + ng
+        
+        # --- WEST ---
+        river_bc_west_idx = find_river_bc(:West, j_phys)
+        open_bc_west_idx = find_open_bc(:West)
+        
+        if river_bc_west_idx !== nothing
+            bc = bcs[river_bc_west_idx]
+            state.tracers[bc.tracer_name][1:ng, j_glob, k] .= bc.concentration(state.time)
+            state.u[ng+1, j_glob, k] = bc.velocity(state.time)
+        elseif open_bc_west_idx !== nothing
+            boundary_velocity = state.u[ng+1, j_glob, k]
+            if boundary_velocity <= 0 # Outflow
+                for tracer in values(state.tracers); tracer[1:ng, j_glob, k] .= tracer[ng+1, j_glob, k]; end
+            else # Inflow
+                for tracer in values(state.tracers); tracer[1:ng, j_glob, k] .= 0.0; end
+            end
+        end
+
+        # --- EAST ---
+        tidal_bc_east_idx = find_tidal_bc(:East)
+        open_bc_east_idx = find_open_bc(:East)
+
+        if tidal_bc_east_idx !== nothing
+            bc = bcs[tidal_bc_east_idx]
+            inflow_values = bc.inflow_concentrations(state.time)
+            boundary_velocity = state.u[nx+ng+1, j_glob, k]
+            if boundary_velocity < 0 # Inflow
+                # --- FIX: Use a safe default of 0.0 for unspecified tracers during inflow ---
+                for (name, arr) in state.tracers; arr[nx+ng+1:nx_tot, j_glob, k] .= get(inflow_values, name, 0.0); end
+            else # Outflow
+                for tracer in values(state.tracers); tracer[nx+ng+1:nx_tot, j_glob, k] .= tracer[nx+ng, j_glob, k]; end
+            end
+        elseif open_bc_east_idx !== nothing
+            boundary_velocity = state.u[nx+ng+1, j_glob, k]
+            if boundary_velocity >= 0 # Outflow
+                for tracer in values(state.tracers); tracer[nx+ng+1:nx_tot, j_glob, k] .= tracer[nx+ng, j_glob, k]; end
+            else # Inflow
+                for tracer in values(state.tracers); tracer[nx+ng+1:nx_tot, j_glob, k] .= 0.0; end
+            end
+        end
+    end
+
+    # --- Pass 2: Process North-South sides (this will correctly fill corners) ---
+    # This pass iterates over the FULL width of the arrays (i_glob in 1:nx_tot).
+    for k in axes(state.v, 3), i_glob in 1:nx_tot
+        i_phys = i_glob - ng # Physical index can be outside [1,nx] here, that's okay
+
+        # --- SOUTH ---
+        # Note: river logic for N/S boundaries would need i_phys
+        open_bc_south_idx = find_open_bc(:South) 
+        if open_bc_south_idx !== nothing
+            boundary_velocity = state.v[i_glob, ng+1, k]
+            if boundary_velocity <= 0 # Outflow
+                for tracer in values(state.tracers); tracer[i_glob, 1:ng, k] .= tracer[i_glob, ng+1, k]; end
+            else # Inflow
+                for tracer in values(state.tracers); tracer[i_glob, 1:ng, k] .= 0.0; end
+            end
+        end
+        
+        # --- NORTH ---
+        open_bc_north_idx = find_open_bc(:North)
+        if open_bc_north_idx !== nothing
+            boundary_velocity = state.v[i_glob, ny+ng+1, k]
+            if boundary_velocity < 0 # Inflow
+                for tracer in values(state.tracers); tracer[i_glob, ny+ng+1:ny_tot, k] .= 0.0; end
+            else # Outflow
+                for tracer in values(state.tracers); tracer[i_glob, ny+ng+1:ny_tot, k] .= tracer[i_glob, ny+ng, k]; end
+            end
+        end
+    end
+end
+
+"""
+    apply_intermediate_boundary_conditions!(C_intermediate, C_final, grid, bcs, tracer_name)
+
+Applies boundary conditions to the intermediate solution `C_intermediate` from the
+x-sweep. This is a critical step for the stability and accuracy of the ADI method.
+
+For Dirichlet (or fixed value) boundary conditions, the value of the intermediate
+field at a boundary cell is set to the known physical boundary value for the final
+solution at the new time step. This prevents the unphysical intermediate variable
+from polluting the second (Y-sweep) step of the ADI solver.
+"""
+function apply_intermediate_boundary_conditions!(C_intermediate::Array{Float64, 3}, C_final::Array{Float64, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
+    # This function is a placeholder to be implemented correctly.
+    # For now, it's a no-op to avoid errors.
+end
+
+end # module BoundaryConditionsModule
+</file>
+
+<file path="src/VectorOperationsModule.jl">
+# src/VectorOperationsModule.jl
+
+module VectorOperationsModule
+
+export rotate_velocities_to_geographic, rotate_velocities_to_grid! # Note the "!"
+
+using ..HydrodynamicTransport.ModelStructs
+
+"""
+    rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
+"""
+function rotate_velocities_to_geographic(grid::CurvilinearGrid, u_stag::AbstractArray, v_stag::AbstractArray)
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    u_east = zeros(Float64, nx, ny, nz); v_north = zeros(Float64, nx, ny, nz)
+    u_rho = zeros(Float64, nx, ny, nz); v_rho = zeros(Float64, nx, ny, nz)
+
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        u_rho[i_phys, j_phys, k] = 0.5 * (u_stag[i_glob, j_glob, k] + u_stag[i_glob+1, j_glob, k])
+        v_rho[i_phys, j_phys, k] = 0.5 * (v_stag[i_glob, j_glob, k] + v_stag[i_glob, j_glob+1, k])
+    end
+
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        ur = u_rho[i_phys, j_phys, k]; vr = v_rho[i_phys, j_phys, k]
+        ang = grid.angle[i_glob, j_glob]
+        u_east[i_phys, j_phys, k] = ur * cos(ang) - vr * sin(ang)
+        v_north[i_phys, j_phys, k] = vr * cos(ang) + ur * sin(ang)
+    end
+    return u_east, v_north
+end
+
+
+"""
+    rotate_velocities_to_grid!(u_stag, v_stag, grid, u_east, v_north)
+
+Rotates geographic velocities (East, North) at cell centers to grid-aligned velocities (u, v) 
+and fills them IN-PLACE into the pre-allocated u_stag and v_stag arrays.
+"""
+function rotate_velocities_to_grid!(u_stag::AbstractArray, v_stag::AbstractArray, grid::CurvilinearGrid, u_east::AbstractArray, v_north::AbstractArray)
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
+    u_rho = zeros(Float64, nx, ny, nz)
+    v_rho = zeros(Float64, nx, ny, nz)
+
+    # 1. Apply the inverse rotation at each physical cell center
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        ue = u_east[i_phys, j_phys, k]; vn = v_north[i_phys, j_phys, k]
+        ang = grid.angle[i_glob, j_glob]
+        u_rho[i_phys, j_phys, k] = ue * cos(-ang) - vn * sin(-ang)
+        v_rho[i_phys, j_phys, k] = vn * cos(-ang) + ue * sin(-ang)
+    end
+
+    # 2. Interpolate from rho-points to staggered faces (physical domain only)
+    # This now writes directly into the provided u_stag and v_stag arrays
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx+1
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        if i_phys == 1
+            u_stag[i_glob, j_glob, k] = u_rho[i_phys, j_phys, k]
+        elseif i_phys == nx + 1
+            u_stag[i_glob, j_glob, k] = u_rho[i_phys-1, j_phys, k]
+        else
+            u_stag[i_glob, j_glob, k] = 0.5 * (u_rho[i_phys-1, j_phys, k] + u_rho[i_phys, j_phys, k])
+        end
+    end
+    
+    for k in 1:nz, j_phys in 1:ny+1, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        if j_phys == 1
+            v_stag[i_glob, j_glob, k] = v_rho[i_phys, j_phys, k]
+        elseif j_phys == ny + 1
+            v_stag[i_glob, j_glob, k] = v_rho[i_phys, j_phys-1, k]
+        else
+            v_stag[i_glob, j_glob, k] = 0.5 * (v_rho[i_phys, j_phys-1, k] + v_rho[i_phys, j_phys, k])
+        end
+    end
+    
+    return nothing # The function modifies u_stag and v_stag in-place
+end
+
+
+end # module VectorOperationsModule
+</file>
+
+<file path="src/GridModule.jl">
+# src/GridModule.jl
+
+module GridModule
+
+export initialize_cartesian_grid, initialize_curvilinear_grid
+
+using ..HydrodynamicTransport.ModelStructs
+using StaticArrays
+using NCDatasets
+using Statistics: mean
+
+# The Cartesian grid initializer remains unchanged.
+function initialize_cartesian_grid(nx::Int, ny::Int, nz::Int, Lx::Float64, Ly::Float64, Lz::Float64; ng::Int=2)::CartesianGrid
+    dx = Lx / nx; dy = Ly / ny; dz = Lz / nz
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+    x = zeros(nx_tot, ny_tot, nz); y = zeros(nx_tot, ny_tot, nz); z = zeros(nx_tot, ny_tot, nz)
+    for k in 1:nz, j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        x[i_glob, j_glob, k] = (i_phys - 0.5) * dx
+        y[i_glob, j_glob, k] = (j_phys - 0.5) * dy
+        z[i_glob, j_glob, k] = (k - 0.5) * dz
+    end
+    grid = CartesianGrid(
+        ng, SVector(nx, ny, nz), x, y, z,
+        fill(dx * dy * dz, (nx_tot, ny_tot, nz)),
+        fill(dy * dz, (nx_tot + 1, ny_tot, nz)),
+        fill(dx * dz, (nx_tot, ny_tot + 1, nz)),
+        fill(dx * dy, (nx_tot, ny_tot, nz + 1)),
+        trues(nx_tot, ny_tot, nz)
+    )
+    return grid
+end
+
+# --- Internal function to auto-detect grid variable and dimension names ---
+function _autodetect_grid_vars_and_dims(ds::NCDataset)
+    var_map = Dict{Symbol, String}()
+    
+    search_patterns = [
+        :ni_rho => [("ni", :dim), ("xi_rho", :dim)],
+        :nj_rho => [("nj", :dim), ("eta_rho", :dim)],
+        :ni_u => [("ni_u", :dim), ("xi_u", :dim)],
+        :nj_u => [("nj_u", :dim), ("eta_u", :dim)],
+        :ni_v => [("ni_v", :dim), ("xi_v", :dim)],
+        :nj_v => [("nj_v", :dim), ("eta_v", :dim)],
+        :nz => [("level", :dim), ("s_rho", :dim)],
+        :nz_w => [("level_w", :dim), ("s_w", :dim)],
+        :lon_rho => [("longitude", :var), ("lon_rho", :var)],
+        :lat_rho => [("latitude", :var), ("lat_rho", :var)],
+        :lon_u => [("longitude_u", :var), ("lon_u", :var)],
+        :lat_u => [("latitude_u", :var), ("lat_u", :var)],
+        :lon_v => [("longitude_v", :var), ("lon_v", :var)],
+        :lat_v => [("latitude_v", :var), ("lat_v", :var)],
+        :h => [("H0", :var), ("h", :var)],
+        :angle => [("angle", :var)],
+        :mask_rho => [("mask_rho", :var)],
+        :mask_u => [("mask_u", :var)],
+        :mask_v => [("mask_v", :var)],
+        :s_w => [("s_w", :var)],
+        :Cs_w => [("Cs_w", :var)],
+        :hc => [("hc", :var)],
+    ]
+
+    if haskey(ds, "pm") && haskey(ds, "pn"); var_map[:pm] = "pm"; var_map[:pn] = "pn"
+    elseif haskey(ds, "dx") && haskey(ds, "dy"); var_map[:pm] = "dx"; var_map[:pn] = "dy"; var_map[:is_inverse_metric] = "true"
+    else; error("Could not find grid metric variables (pm/pn or dx/dy) in the NetCDF file."); end
+
+    for (target_symbol, patterns) in search_patterns
+        for (name, type) in patterns
+            collection = (type == :var) ? keys(ds) : keys(ds.dim)
+            if name in collection; var_map[target_symbol] = name; break; end
+        end
+    end
+    
+    return var_map
+end
+
+
+# --- Refactored Curvilinear Grid Initializer with Auto-Detection ---
+function initialize_curvilinear_grid(netcdf_filepath::String; ng::Int=2)::CurvilinearGrid
+    ds = NCDataset(netcdf_filepath)
+    grid_vars = _autodetect_grid_vars_and_dims(ds)
+    nx_rho, ny_rho = ds.dim[grid_vars[:ni_rho]], ds.dim[grid_vars[:nj_rho]]; nx_u, ny_u = ds.dim[grid_vars[:ni_u]], ds.dim[grid_vars[:nj_u]]; nx_v, ny_v = ds.dim[grid_vars[:ni_v]], ds.dim[grid_vars[:nj_v]]; nz = ds.dim[grid_vars[:nz]]
+    lon_rho_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); lat_rho_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); pm_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); pn_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); angle_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); h_full = zeros(Float64, nx_rho + 2*ng, ny_rho + 2*ng); mask_rho_full= ones(Bool, nx_rho + 2*ng, ny_rho + 2*ng); lon_u_full = zeros(Float64, nx_u + 2*ng, ny_u + 2*ng); lat_u_full = zeros(Float64, nx_u + 2*ng, ny_u + 2*ng); mask_u_full = ones(Bool, nx_u + 2*ng, ny_u + 2*ng); lon_v_full = zeros(Float64, nx_v + 2*ng, ny_v + 2*ng); lat_v_full = zeros(Float64, nx_v + 2*ng, ny_v + 2*ng); mask_v_full = ones(Bool, nx_v + 2*ng, ny_v + 2*ng)
+    rho_interior(A) = view(A, ng+1:nx_rho+ng, ng+1:ny_rho+ng); u_interior(A) = view(A, ng+1:nx_u+ng, ng+1:ny_u+ng); v_interior(A) = view(A, ng+1:nx_v+ng, ng+1:ny_v+ng)
+    
+    rho_interior(lon_rho_full) .= coalesce.(ds[grid_vars[:lon_rho]][:,:], 0.0); rho_interior(lat_rho_full) .= coalesce.(ds[grid_vars[:lat_rho]][:,:], 0.0)
+    rho_interior(h_full) .= coalesce.(ds[grid_vars[:h]][:,:], 0.0)
+
+    # --- FIX: Intelligently create the mask based on what's available ---
+    if haskey(grid_vars, :mask_rho)
+        rho_interior(mask_rho_full) .= (coalesce.(ds[grid_vars[:mask_rho]][:,:], 0) .== 1)
+    else # Infer mask from bathymetry (H0 > 0 is water)
+        rho_interior(mask_rho_full) .= (rho_interior(h_full) .> 0.0)
+    end
+    
+    if haskey(grid_vars, :is_inverse_metric); rho_interior(pm_full) .= 1 ./ coalesce.(ds[grid_vars[:pm]][:,:], 1.0); rho_interior(pn_full) .= 1 ./ coalesce.(ds[grid_vars[:pn]][:,:], 1.0); else; rho_interior(pm_full) .= coalesce.(ds[grid_vars[:pm]][:,:], 0.0); rho_interior(pn_full) .= coalesce.(ds[grid_vars[:pn]][:,:], 0.0); end
+    if haskey(grid_vars, :angle); rho_interior(angle_full) .= coalesce.(ds[grid_vars[:angle]][:,:], 0.0); end
+    if haskey(grid_vars, :lon_u); u_interior(lon_u_full) .= coalesce.(ds[grid_vars[:lon_u]][:,:], 0.0); end; if haskey(grid_vars, :lat_u); u_interior(lat_u_full) .= coalesce.(ds[grid_vars[:lat_u]][:,:], 0.0); end
+    if haskey(grid_vars, :mask_u); u_interior(mask_u_full) .= (coalesce.(ds[grid_vars[:mask_u]][:,:], 0) .== 1); else; u_interior(mask_u_full) .= (view(h_full, ng+1:nx_u+ng, ng+1:ny_u+ng) .> 0.0) .& (view(h_full, ng+2:nx_u+ng+1, ng+1:ny_u+ng) .> 0.0); end
+    if haskey(grid_vars, :lon_v); v_interior(lon_v_full) .= coalesce.(ds[grid_vars[:lon_v]][:,:], 0.0); end; if haskey(grid_vars, :lat_v); v_interior(lat_v_full) .= coalesce.(ds[grid_vars[:lat_v]][:,:], 0.0); end
+    if haskey(grid_vars, :mask_v); v_interior(mask_v_full) .= (coalesce.(ds[grid_vars[:mask_v]][:,:], 0) .== 1); else; v_interior(mask_v_full) .= (view(h_full, ng+1:nx_v+ng, ng+1:ny_v+ng) .> 0.0) .& (view(h_full, ng+1:nx_v+ng, ng+2:ny_v+ng+1) .> 0.0); end
+
+    z_w = if haskey(grid_vars, :s_w) && haskey(grid_vars, :Cs_w) && haskey(grid_vars, :hc); s_w = ds[grid_vars[:s_w]][:]; Cs_w = ds[grid_vars[:Cs_w]][:]; hc = ds[grid_vars[:hc]][:]; h_phys = ds[grid_vars[:h]][:,:]; h_avg = mean(coalesce.(h_phys[h_phys .> 0], 0.0)); h_avg .* (hc .* s_w .+ h_avg .* Cs_w) ./ (hc .+ h_avg); else; collect(range(-1.0, 0.0, length=nz+1)); end
+    close(ds)
+    extrapolate!(A) = begin; nx_p, ny_p = size(A) .- 2*ng; for j in ng+1:ny_p+ng; A[1:ng, j] .= A[ng+1, j]; A[nx_p+ng+1:end, j] .= A[nx_p+ng, j]; end; for i in 1:size(A, 1); A[i, 1:ng] .= A[i, ng+1]; A[i, ny_p+ng+1:end] .= A[i, ny_p+ng]; end; end
+    for arr in [lon_rho_full, lat_rho_full, pm_full, pn_full, angle_full, h_full, mask_rho_full, lon_u_full, lat_u_full, mask_u_full, lon_v_full, lat_v_full, mask_v_full]; extrapolate!(arr); end
+    nx_tot, ny_tot = nx_rho + 2*ng, ny_rho + 2*ng; face_area_x = zeros(nx_tot + 1, ny_tot, nz); face_area_y = zeros(nx_tot, ny_tot + 1, nz); volume = zeros(nx_tot, ny_tot, nz); dz = z_w[2:end] - z_w[1:end-1]
+    for k in 1:nz; for j in 1:ny_tot, i in 1:nx_tot; volume[i,j,k] = (1/pm_full[i,j]) * (1/pn_full[i,j]) * abs(dz[k]); end; for j in 1:ny_tot, i in 1:nx_tot+1; dy_local = (i > 1 && i <= nx_tot) ? 0.5 * (1/pn_full[i-1,j] + 1/pn_full[i,j]) : 1/pn_full[min(i, nx_tot), j]; face_area_x[i,j,k] = dy_local * abs(dz[k]); end; for j in 1:ny_tot+1, i in 1:nx_tot; dx_local = (j > 1 && j <= ny_tot) ? 0.5 * (1/pm_full[i,j-1] + 1/pm_full[i,j]) : 1/pm_full[i, min(j, ny_tot)]; face_area_y[i,j,k] = dx_local * abs(dz[k]); end; end
+    return CurvilinearGrid(ng, nx_rho, ny_rho, nz, lon_rho_full, lat_rho_full, lon_u_full, lat_u_full, lon_v_full, lat_v_full, z_w, pm_full, pn_full, angle_full, h_full, mask_rho_full, mask_u_full, mask_v_full, face_area_x, face_area_y, volume)
+end
+
+end # module GridModule
+</file>
+
+<file path="src/SourceSinkModule.jl">
+# src/SourceSinkModule.jl
+
+module SourceSinkModule
+
+export source_sink_terms!
+
+using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.ModelStructs: CurvilinearGrid, CartesianGrid
+
+"""
+Performs an expanding box search to find the nearest "wet" cell.
+"""
+function _find_nearest_wet_neighbor(start_i::Int, start_j::Int, grid::CurvilinearGrid, state::State, D_crit::Float64)
+    ng = grid.ng
+    nx_phys, ny_phys = grid.nx, grid.ny
+
+    # Search in an expanding box around the starting point
+    for radius in 1:max(nx_phys, ny_phys)
+        for i_offset in -radius:radius, j_offset in -radius:radius
+            if abs(i_offset) < radius && abs(j_offset) < radius
+                continue
+            end
+
+            i_candidate = start_i + i_offset
+            j_candidate = start_j + j_offset
+
+            if 1 <= i_candidate <= nx_phys && 1 <= j_candidate <= ny_phys
+                i_glob = i_candidate + ng
+                j_glob = j_candidate + ng
+                
+                # Check if the cell is a water cell and if total depth is sufficient
+                if grid.mask_rho[i_glob, j_glob] && (grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, grid.nz] > D_crit)
+                    return (i_candidate, j_candidate)
+                end
+            end
+        end
+    end
+
+    @warn "Could not find a wet neighbor for source at ($start_i, $start_j). Using original location."
+    return (start_i, start_j) # Fallback
+end
+
+function source_sink_terms!(state::State, grid::AbstractGrid, sources::Vector{PointSource}, functional_interactions::Vector{FunctionalInteraction}, time::Float64, dt::Float64, D_crit::Float64)
+    ng = grid.ng
+
+    # --- Point Source Influx (Single-Threaded) ---
+    # This part is kept single-threaded for safety, as the number of sources is
+    # typically small and the risk of a race condition exists if sources overlap.
+    if grid isa CurvilinearGrid
+        nx_phys, ny_phys, nz_phys = grid.nx, grid.ny, grid.nz
+        for source in sources
+            if haskey(state.tracers, source.tracer_name)
+                C = state.tracers[source.tracer_name]
+                target_i, target_j = source.i, source.j
+
+                if source.relocate_if_dry
+                    i_glob_orig = source.i + ng
+                    j_glob_orig = source.j + ng
+                    
+                    is_dry = !grid.mask_rho[i_glob_orig, j_glob_orig] || 
+                             (grid.h[i_glob_orig, j_glob_orig] + state.zeta[i_glob_orig, j_glob_orig, nz_phys] <= D_crit)
+
+                    if is_dry
+                        target_i, target_j = _find_nearest_wet_neighbor(source.i, source.j, grid, state, D_crit)
+                    end
+                end
+                
+                target_k = (target_i != source.i || target_j != source.j) ? nz_phys : source.k
+                i_glob, j_glob, k_glob = target_i + ng, target_j + ng, target_k
+                
+                if checkbounds(Bool, C, i_glob, j_glob, k_glob)
+                    if grid.volume[i_glob, j_glob, k_glob] > 1e-12
+                        current_influx_rate = source.influx_rate(time)
+                        C[i_glob, j_glob, k_glob] += (current_influx_rate * dt) / grid.volume[i_glob, j_glob, k_glob]
+                    else
+                         @warn "Target cell volume is zero at physical index ($target_i, $target_j, $target_k). Source ignored."
+                    end
+                else
+                    @warn "Source target at physical index ($target_i, $target_j, $target_k) is out of bounds."
+                end
+            end
+        end
+    else # For CartesianGrid and any other AbstractGrid types
+        for source in sources
+            if haskey(state.tracers, source.tracer_name)
+                C = state.tracers[source.tracer_name]
+                i_glob, j_glob, k_glob = source.i + ng, source.j + ng, source.k
+                if checkbounds(Bool, C, i_glob, j_glob, k_glob)
+                    current_influx_rate = source.influx_rate(time)
+                    C[i_glob, j_glob, k_glob] += (current_influx_rate * dt) / grid.volume[i_glob, j_glob, k_glob]
+                end
+            end
+        end
+    end
+
+    # --- Functional Tracer Interactions (Multi-Threaded) ---
+    if !isempty(functional_interactions)
+        nx_p, ny_p, nz_p = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
+        
+        # Parallelize the outer loop over vertical layers (k).
+        # Each thread will process a different set of horizontal slices.
+        Threads.@threads for k in 1:nz_p
+            # Each thread gets its own private dictionary to avoid race conditions.
+            local_concentrations = Dict{Symbol, Float64}()
+
+            for j in 1:ny_p
+                for i in 1:nx_p
+                    i_glob, j_glob, k_glob = i + ng, j + ng, k
+
+                    mask_to_use = isa(grid, CurvilinearGrid) ? grid.mask_rho[i_glob, j_glob] : grid.mask[i_glob, j_glob, k_glob]
+                    if !mask_to_use
+                        continue
+                    end
+
+                    depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
+                    environment = (
+                        T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
+                        S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,
+                        TSS = isdefined(state, :tss) ? state.tss[i_glob, j_glob, k_glob] : NaN,
+                        UVB = isdefined(state, :uvb) ? state.uvb[i_glob, j_glob, k_glob] : NaN,
+                        depth = depth
+                    )
+
+                    for interaction in functional_interactions
+                        empty!(local_concentrations)
+                        all_tracers_exist = true
+                        for tracer_name in interaction.affected_tracers
+                            if haskey(state.tracers, tracer_name)
+                                local_concentrations[tracer_name] = state.tracers[tracer_name][i_glob, j_glob, k_glob]
+                            else
+                                all_tracers_exist = false
+                                @warn "Tracer $(tracer_name) required by an interaction function not found in state. Skipping interaction."
+                                break
+                            end
+                        end
+                        if !all_tracers_exist; continue; end
+
+                        dC = interaction.interaction_function(local_concentrations, environment, dt)
+
+                        for (tracer_name, change) in dC
+                            if haskey(state.tracers, tracer_name)
+                                state.tracers[tracer_name][i_glob, j_glob, k_glob] += change
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+end # module SourceSinkModule
+</file>
+
+<file path="src/StateModule.jl">
+# src/StateModule.jl
+
+module StateModule
+
+export initialize_state
+
+using ..HydrodynamicTransport.ModelStructs 
+using NCDatasets
+
+function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
+    ng = grid.ng
+    nx, ny, nz = grid.dims
+    
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+
+    tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}()
+    for name in tracer_names
+        tracer_arr = zeros(Float64, nx_tot, ny_tot, nz)
+        tracers[name] = tracer_arr
+        buffers[name] = zeros(size(tracer_arr))
+    end
+    
+    # --- NEW: Initialize bed_mass dictionary ---
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        bed_mass[name] = zeros(Float64, nx_tot, ny_tot)
+    end
+
+    u = zeros(Float64, nx_tot + 1, ny_tot, nz)
+    v = zeros(Float64, nx_tot, ny_tot + 1, nz)
+    w = zeros(Float64, nx_tot, ny_tot, nz + 1)
+
+    flux_x = zeros(size(u))
+    flux_y = zeros(size(v))
+    flux_z = zeros(size(w))
+    
+    temperature = zeros(Float64, nx_tot, ny_tot, nz)
+    salinity = zeros(Float64, nx_tot, ny_tot, nz)
+    tss = zeros(Float64, nx_tot, ny_tot, nz)
+    uvb = zeros(Float64, nx_tot, ny_tot, nz)
+    zeta = zeros(Float64, nx_tot, ny_tot, nz)
+
+    # --- UPDATED: Pass bed_mass to the constructor ---
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+end
+
+function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
+    nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
+
+    tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}()
+    for name in tracer_names
+        tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracers[name] = tracer_arr
+        buffers[name] = zeros(size(tracer_arr))
+    end
+    
+    # --- NEW: Initialize bed_mass dictionary ---
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
+    end
+
+    u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
+    v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
+    w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
+    
+    flux_x = zeros(size(u))
+    flux_y = zeros(size(v))
+    flux_z = zeros(size(w))
+    
+    temperature = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+
+    # --- UPDATED: Pass bed_mass to the constructor ---
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+end
+
+function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+
+    nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
+    tracers = Dict{Symbol, Array{Float64, 3}}()
+    buffers = Dict{Symbol, Array{Float64, 3}}()
+    for name in tracer_names
+        tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+        tracers[name] = tracer_arr
+        buffers[name] = zeros(size(tracer_arr))
+    end
+    
+    # --- NEW: Initialize bed_mass dictionary ---
+    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+    for name in sediment_tracers
+        bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
+    end
+
+    u = zeros(Float64, nx_rho_tot + 1, ny_rho_tot, nz)
+    v = zeros(Float64, nx_rho_tot, ny_rho_tot + 1, nz)
+    w = zeros(Float64, nx_rho_tot, ny_rho_tot, nz + 1)
+
+    flux_x = zeros(size(u))
+    flux_y = zeros(size(v))
+    flux_z = zeros(size(w))
+    
+    temperature = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    salinity = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    tss = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+    zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
+
+    # --- UPDATED: Pass bed_mass to the constructor ---
+    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+end
+
+end # module StateModule
+</file>
+
+<file path="src/UtilsModule.jl">
+# src/UtilsModule.jl
+
+module UtilsModule
+
+export estimate_stable_timestep
+export create_hydrodynamic_data_from_file
+export lonlat_to_ij
+
+using NCDatasets
+using Dates
+using ..HydrodynamicTransport.ModelStructs
+
+
+"""
+    estimate_stable_timestep(hydro_data; advection_scheme, start_time, end_time, ...)
+
+Estimates a recommended timestep (dt) based on the chosen advection scheme and time window.
+
+By default, it uses a fast sampling method to find maximum velocities within the specified
+time window. To check the full time window (slower but more accurate), set `time_samples=nothing`.
+
+# Arguments
+- `hydro_data`: The `HydrodynamicData` object for the simulation.
+- `advection_scheme::Symbol`: The advection scheme to be used (`:TVD`, `:UP3`, `:ImplicitADI`).
+- `start_time::Union{Float64, Nothing}`: The simulation start time in seconds to begin sampling. If `nothing`, starts from the beginning of the file.
+- `end_time::Union{Float64, Nothing}`: The simulation end time in seconds to stop sampling. If `nothing`, samples until the end of the file.
+- `dx_var::String`, `dy_var::String`: Names of the grid cell size variables in the NetCDF file.
+- `safety_factor`: For explicit schemes, the factor to reduce the calculated CFL timestep for safety (e.g., 0.8).
+- `CFL_acc`: For implicit schemes, the desired "accuracy Courant number" to base the recommendation on (e.g., 5.0).
+- `time_samples`: Number of time steps to sample for velocity checks. `nothing` scans the entire specified time window.
+"""
+function estimate_stable_timestep(hydro_data::HydrodynamicData; 
+                                 advection_scheme::Symbol=:TVD,
+                                 start_time::Union{Float64, Nothing}=nothing,
+                                 end_time::Union{Float64, Nothing}=nothing,
+                                 dx_var::String="dx", 
+                                 dy_var::String="dy", 
+                                 safety_factor=0.8,
+                                 CFL_acc::Float64=5.0,
+                                 time_samples::Union{Int, Nothing}=3)
+    
+    filepath = hydro_data.filepath
+    println("--- Estimating Timestep from '$filepath' (Scheme: $advection_scheme) ---")
+    
+    u_var = get(hydro_data.var_map, :u, "u")
+    v_var = get(hydro_data.var_map, :v, "v")
+    time_var = get(hydro_data.var_map, :time, "ocean_time")
+
+    local u_max, v_max, dx_min, dy_min
+    
+    try
+        ds = NCDataset(filepath)
+        # 1. Find minimum grid spacing
+        if !haskey(ds, dx_var) || !haskey(ds, dy_var); error("Grid spacing variables '$dx_var' or '$dy_var' not found."); end
+        dx_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dx_var][:]))
+        dy_min = minimum(filter(x -> !ismissing(x) && x > 0, ds[dy_var][:]))
+        println("Minimum grid spacing: dx ≈ $(round(dx_min, digits=2))m, dy ≈ $(round(dy_min, digits=2))m")
+
+        # 2. Find maximum velocities
+        if !haskey(ds, u_var) || !haskey(ds, v_var); error("Velocity variables '$u_var' or '$v_var' not found."); end
+        
+        # Convert DateTime objects to elapsed seconds for comparison
+        time_dim_raw = ds[time_var][:]
+        time_dim_seconds = if eltype(time_dim_raw) <: Dates.AbstractTime
+            t0 = time_dim_raw[1]
+            [(dt - t0).value / 1000.0 for dt in time_dim_raw]
+        else
+            time_dim_raw
+        end
+
+        # Find the start and end indices corresponding to the provided times
+        start_idx = start_time !== nothing ? searchsortedfirst(time_dim_seconds, start_time) : 1
+        end_idx = end_time !== nothing ? searchsortedlast(time_dim_seconds, end_time) : length(time_dim_seconds)
+        if end_idx < start_idx; end_idx = start_idx; end
+
+        # Robustness check: if the window is too small, expand it to get a good sample.
+        num_available_steps = end_idx - start_idx + 1
+        num_samples = time_samples === nothing ? num_available_steps : time_samples
+        
+        if num_available_steps < num_samples
+            println("Warning: Specified time window is too small or data resolution is too coarse.")
+            new_end_idx = min(start_idx + num_samples - 1, length(time_dim_seconds))
+            println("Expanding search window from indices [$start_idx, $end_idx] to [$start_idx, $new_end_idx].")
+            end_idx = new_end_idx
+        end
+
+        println("Sampling for velocities between time index $start_idx and $end_idx...")
+        
+        if time_samples === nothing
+            slicer = (fill(Colon(), ndims(ds[u_var]) - 1)..., start_idx:end_idx)
+            u_max = maximum(abs, skipmissing(ds[u_var][slicer...]));
+            v_max = maximum(abs, skipmissing(ds[v_var][slicer...]));
+        else
+            indices_to_sample = round.(Int, range(start_idx, stop=end_idx, length=num_samples))
+            u_max_samples, v_max_samples = Float64[], Float64[]
+            for t_idx in unique(indices_to_sample)
+                slicer = (fill(Colon(), ndims(ds[u_var]) - 1)..., t_idx)
+                push!(u_max_samples, maximum(abs, skipmissing(ds[u_var][slicer...])))
+                push!(v_max_samples, maximum(abs, skipmissing(ds[v_var][slicer...])))
+            end
+            u_max = maximum(u_max_samples); v_max = maximum(v_max_samples)
+        end
+        println("Maximum grid-aligned velocities found in window: u_max ≈ $(round(u_max, digits=2))m/s, v_max ≈ $(round(v_max, digits=2))m/s")
+        close(ds)
+    catch e
+        println("Error during data loading for timestep estimation: $e"); return -1.0
+    end
+
+    # 3. Calculate timestep
+    if u_max < 1e-9 && v_max < 1e-9
+        @warn "Velocities are zero or negligible; cannot estimate timestep."
+        return Inf
+    end
+
+    cfl_denominator = (u_max / dx_min + v_max / dy_min)
+    if advection_scheme in (:TVD, :UP3)
+        recommended_dt = (1 / cfl_denominator) * safety_factor
+        println("--------------------------------------------------")
+        println("Recommended STABLE timestep (dt): $(round(recommended_dt, digits=2)) seconds")
+        println(" (Based on CFL stability limit with safety factor $safety_factor)")
+        println("--------------------------------------------------")
+    elseif advection_scheme == :ImplicitADI
+        recommended_dt = CFL_acc / cfl_denominator
+        println("--------------------------------------------------")
+        println("Recommended ACCURACY timestep (dt): $(round(recommended_dt, digits=2)) seconds")
+        println(" (Based on accuracy Courant number CFL_acc = $CFL_acc)")
+        println("--------------------------------------------------")
+    else
+        error("Unknown advection scheme '$advection_scheme' for timestep estimation.")
+    end
+    
+    return recommended_dt
+end
+
+
+"""
+    create_hydrodynamic_data_from_file(filepath::String) -> HydrodynamicData
+
+Automatically inspects a NetCDF file and attempts to generate the `variable_map`
+required by `HydrodynamicData`.
+
+It searches for common variable names and attributes (like `standard_name` or `long_name`)
+to identify velocities, salinity, temperature, and time.
+
+# Arguments
+- `filepath`: Path to the NetCDF grid/history file.
+
+# Returns
+- A configured `HydrodynamicData` object.
+"""
+function create_hydrodynamic_data_from_file(filepath::String)
+    println("--- Autodetecting variables from '$filepath' ---")
+    variable_map = Dict{Symbol, String}()
+    
+    # --- FIX: Prioritize 3D baroclinic velocities (uz, vz) over 2D barotropic (u, v) ---
+    search_patterns = Dict(
+        :u => [("standard_name", "sea_water_x_velocity"), ("long_name", "u-velocity"), ("var_name", ("uz", "u", "U"))],
+        :v => [("standard_name", "sea_water_y_velocity"), ("long_name", "v-velocity"), ("var_name", ("vz", "v", "V"))],
+        :salt => [("standard_name", "sea_water_salinity"), ("long_name", "salinity"), ("var_name", ("salt", "sal", "SAL"))],
+        :temp => [("standard_name", "sea_water_potential_temperature"), ("long_name", "temperature"), ("var_name", ("temp", "TEMP"))],
+        :time => [("standard_name", "time"), ("long_name", "time"), ("var_name", ("time", "ocean_time"))]
+    )
+    
+    ds = NCDataset(filepath)
+    file_vars = keys(ds)
+    for (target_symbol, patterns) in search_patterns
+        found = false
+        for (search_type, pattern) in patterns
+            if found; break; end
+            for var_name in file_vars
+                if search_type == "var_name"
+                    if lowercase(var_name) in pattern
+                        variable_map[target_symbol] = var_name; println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by variable name)"); found = true; break
+                    end
+                else 
+                    if haskey(ds[var_name].attrib, search_type)
+                        attr_value = lowercase(ds[var_name].attrib[search_type])
+                        # Add a check to exclude barotropic velocities when searching for standard_name
+                        if occursin(pattern, attr_value) && !occursin("barotropic", attr_value)
+                            variable_map[target_symbol] = var_name; println("  ✓ Found :$(target_symbol) -> '$(var_name)' (matched by attribute '$(search_type)')"); found = true; break
+                        end
+                    end
+                end
+            end
+        end
+        if !found; println("  - Warning: Could not find a variable for :$(target_symbol)"); end
+    end
+    close(ds)
+    return HydrodynamicData(filepath, variable_map)
+end
+
+"""
+    lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64) -> Union{Tuple{Int, Int}, Nothing}
+
+Finds the physical grid indices (i, j) of the water cell center closest to the target
+geographic coordinates (longitude, latitude).
+
+If the target coordinates are outside the grid's geographic bounding box, or if no
+water cells are found nearby, it returns `nothing` and issues a warning.
+"""
+function lonlat_to_ij(grid::CurvilinearGrid, lon::Float64, lat::Float64)
+    nx, ny = grid.nx, grid.ny
+    ng = grid.ng
+
+    # --- FIX: Calculate the bounding box using ONLY the valid water points ---
+    # This prevents missing/fill values from skewing the calculation.
+    water_points_mask = view(grid.mask_rho, ng+1:nx+ng, ng+1:ny+ng)
+    if !any(water_points_mask)
+        @warn "The provided grid has no water points (all cells are masked as land)."
+        return nothing
+    end
+
+    lon_phys = view(grid.lon_rho, ng+1:nx+ng, ng+1:ny+ng)
+    lat_phys = view(grid.lat_rho, ng+1:nx+ng, ng+1:ny+ng)
+    
+    lon_min, lon_max = extrema(lon_phys[water_points_mask])
+    lat_min, lat_max = extrema(lat_phys[water_points_mask])
+
+    if !(lon_min <= lon <= lon_max) || !(lat_min <= lat <= lat_max)
+        @warn "Target coordinates ($lon, $lat) are outside the grid's geographic bounding box of water points. Lon: [$lon_min, $lon_max], Lat: [$lat_min, $lat_max]."
+        return nothing
+    end
+    
+    min_dist_sq = Inf
+    best_i, best_j = -1, -1
+    is_tie = false
+
+    @inbounds for j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        
+        # Search only over water cells
+        if grid.mask_rho[i_glob, j_glob]
+            dist_sq = (grid.lon_rho[i_glob, j_glob] - lon)^2 + (grid.lat_rho[i_glob, j_glob] - lat)^2
+            
+            if dist_sq < min_dist_sq
+                min_dist_sq = dist_sq
+                best_i, best_j = i_phys, j_phys
+                is_tie = false
+            elseif dist_sq == min_dist_sq
+                is_tie = true
+            end
+        end
+    end
+    
+    if best_i == -1
+        @warn "Target coordinates ($lon, $lat) are within the bounding box but no water cells were found."
+        return nothing
+    end
+
+    if is_tie
+        @warn "Multiple grid points are equidistant to the target coordinates ($lon, $lat). " *
+              "Returning the first match found: (i=$best_i, j=$best_j)."
+    end
+
+    return best_i, best_j
+end
+
+
+end # module UtilsModule
+</file>
+
+<file path="src/VerticalTransportModule.jl">
+# src/VerticalTransportModule.jl
+
+module VerticalTransportModule
+
+export vertical_transport!
+
+using ..HydrodynamicTransport.ModelStructs
+using LinearAlgebra
+
+# --- Diffusion Solver for a single Cartesian column ---
+function solve_implicit_diffusion_column!(
+    C_out_col::AbstractVector,
+    C_in_col::AbstractVector,
+    grid::CartesianGrid,
+    i_glob::Int, j_glob::Int,
+    dt::Float64, Kz::Float64
+)
+    nz = length(C_in_col)
+    if nz <= 1; C_out_col .= C_in_col; return; end
+    
+    @inbounds dz = [grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k] for k in 1:nz]
+    alpha = 0.5 * Kz * dt ./ (dz .* dz)
+    
+    lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
+    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
+    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
+    A = Tridiagonal(lower_A, main_A, upper_A)
+    
+    lower_B = alpha[2:end]; main_B  = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
+    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
+    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
+    B = Tridiagonal(lower_B, main_B, upper_B)
+    
+    rhs = B * C_in_col
+    C_out_col .= A \ rhs
+end
+
+# --- Diffusion Solver for a single Curvilinear column ---
+function solve_implicit_diffusion_column!(
+    C_out_col::AbstractVector,
+    C_in_col::AbstractVector,
+    grid::CurvilinearGrid,
+    i_glob::Int, j_glob::Int,
+    dt::Float64, Kz::Float64
+)
+    nz = length(C_in_col)
+    if nz <= 1; C_out_col .= C_in_col; return; end
+
+    @inbounds dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
+    alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
+    
+    lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
+    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
+    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
+    A = Tridiagonal(lower_A, main_A, upper_A)
+    
+    lower_B = alpha[2:end]; main_B  = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
+    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
+    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
+    B = Tridiagonal(lower_B, main_B, upper_B)
+    
+    rhs = B * C_in_col
+    C_out_col .= A \ rhs
+end
+
+
+# --- Main transport function (Multithreaded) ---
+function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
+    Kz = 1e-4
+    ng = grid.ng
+    nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
+    if nz <= 1; return; end
+
+    for tracer_name in keys(state.tracers)
+        C_final = state.tracers[tracer_name]
+        C_buffer = state._buffers[tracer_name]
+
+        # --- 1. Advection Step ---
+        # This loop is parallelized. Each thread handles a different set of water columns.
+        Threads.@threads for j_phys in 1:ny
+            @inbounds for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+
+                C_col_in = C_final[i_glob, j_glob, :]
+                C_col_out = view(C_buffer, i_glob, j_glob, :)
+                
+                flux_z_col = view(state.flux_z, i_glob, j_glob, :)
+                flux_z_col .= 0.0
+
+                for k in 2:nz
+                    velocity = state.w[i_glob, j_glob, k]
+                    concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
+                    
+                    face_area = if isa(grid, CartesianGrid)
+                        grid.face_area_z[i_glob, j_glob, k]
+                    else # CurvilinearGrid
+                        1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+                    end
+                    flux_z_col[k] = velocity * concentration_at_face * face_area
+                end
+
+                for k in 1:nz
+                    flux_divergence = flux_z_col[k+1] - flux_z_col[k]
+                    volume = grid.volume[i_glob, j_glob, k]
+                    if volume > 0
+                        C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
+                    else
+                        C_col_out[k] = C_col_in[k]
+                    end
+                end
+            end
+        end
+
+        # --- 2. Diffusion Step ---
+        # This loop is also parallelized, as each column's implicit solve is independent.
+        Threads.@threads for j_phys in 1:ny
+            @inbounds for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+
+                C_col_in = C_buffer[i_glob, j_glob, :]
+                C_col_out = view(C_final, i_glob, j_glob, :)
+                
+                solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+            end
+        end
+    end
+    return nothing
+end
+
+end # module VerticalTransportModule
+</file>
+
+<file path="src/SCRIPTING_HYDRODYN.jl">
+using Pkg
+#Pkg.develop(path=joinpath(@__DIR__, ".."))
+Pkg.activate(joinpath(@__DIR__, ".."))
+
+using Revise
+using HydrodynamicTransport
+using UnicodePlots
+using NCDatasets
+
+
+
+
+#TODO
+#=
+Step 5: Refactor Helper Functions in HorizontalTransportModule.jl
+Goal: Ensure that calculations of cell size (dx, dy) are correct for cells near the boundary.
+
+Analysis: I have identified a critical bug. Functions like get_dx_at_face currently take i_phys and j_phys as arguments and use them to index into the pm and pn arrays. This is incorrect. The pm and pn arrays now have ghost cells and must be indexed with the full global indices (i_glob, j_glob) to correctly access the extrapolated metric values in the ghost region.
+
+Proposed Change: I will change the signature of all grid-spacing helper functions (e.g., get_dx_at_face, get_dy_centers) to accept the global indices (i_glob, j_glob) instead of the physical ones. The main advection/diffusion loops will be updated to pass these correct indices. This is a crucial fix for stability.
+
+Step 6: Implement VerticalTransportModule.jl for Curvilinear Grids
+Goal: Add the necessary methods to perform vertical transport on a curvilinear grid.
+
+Analysis: This module currently only has methods for CartesianGrid. We need to add new methods that can be dispatched for a CurvilinearGrid.
+
+Proposed Change:
+
+I will add a new method for solve_implicit_diffusion_column! that is specialized for CurvilinearGrid. It will correctly calculate dz from the grid.z_w vector and the vertical face area from 1 / (pm * pn).
+
+I will update the main vertical_transport! function to correctly handle the CurvilinearGrid case, using its new helper.
+
+Step 7: Create a New Integration Test
+Goal: Add a final test to IntegrationTestsModule.jl that runs a short, end-to-end simulation on the curvilinear grid to prove that all the components work together.
+
+Analysis: A simple test that confirms stability and mass conservation is the best way to validate the entire refactoring effort.
+
+Proposed Change: I will add a new @testset "Curvilinear Simulation" that:
+
+Initializes the grid and state from the ROMS file.
+
+Sets all boundary velocities to zero to enforce a no-flux, closed-domain condition.
+
+Initializes a simple tracer patch in the middle of the domain.
+
+Runs the simulation for a few hundred steps.
+
+Asserts that the total tracer mass is conserved and that no NaN values are produced.
+
+This plan systematically addresses all the remaining pieces of the refactoring. Once this is complete, the model will be fully capable of running stable, conservative simulations on real-world curvilinear grids.
+=#
+
+# write tests to test the overall working of curvi and regular grids again
+# then  to speed up the process. its too slow right now. 
+
+
+@info "Setting up Real Data simulation..."
+# OPeNDAP URL and variable map
+norway_netcdf_filepath = "https://ns9081k.hyrax.sigma2.no/opendap/K160_bgc/Sim2/ocean_his_0001.nc"
+norway_variable_map = Dict(
+	:u => "u",
+	:v => "v",
+	:temp => "temp",
+	:salt => "salt",
+	:time => "ocean_time"
+)
+norway_hydro_data = HydrodynamicData(norway_netcdf_filepath, norway_variable_map)
+# Simulation time and sources
+norway_start_time = 0.0
+norway_end_time = 2 * 3600.0
+norway_dt = 120.0 * 12
+norway_output_interval = 60*60*5.0
+norway_source_config = [
+	PointSource(i=100, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=200, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=300, j=300, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+    PointSource(i=10, j=20, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	PointSource(i=80, j=90, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7),
+	#PointSource(i=500, j=100, k=1, tracer_name=:C_virus, influx_rate=(t)->1.5e7)
+]
+# Connect to the remote dataset
+@info "Connecting to remote NetCDF file via OPeNDAP..."
+ds = NCDataset(norway_netcdf_filepath)
+@info "Connection successful."
+# --- UPDATED: Initialize grid and state correctly for curvilinear data ---
+@info "Initializing Curvilinear Grid from NetCDF..."
+norway_grid = initialize_curvilinear_grid(norway_hydro_data.filepath)
+
+@info "Initializing State with NetCDF dimensions..."
+norway_initial_state = initialize_state(norway_grid, ds, (:C_virus,))
+# Run the simulation
+@info "Starting simulation on real data..."
+norway_f_state = run_simulation(
+    norway_grid,
+    norway_initial_state,
+    norway_source_config,
+    ds,
+    norway_hydro_data,
+    norway_start_time,
+    norway_end_time,
+    norway_dt
+)
+
+close(ds)
+@info "Real data simulation finished."
+</file>
+
+<file path="src/TestCasesModule.jl">
+# test/runtestsmodule.jl
+
+# --- 1. Set up the Environment ---
+
+using Test
+using HydrodynamicTransport
+using NCDatasets
+
+# --- Bring all necessary functions into scope for testing ---
+using HydrodynamicTransport.ModelStructs
+using HydrodynamicTransport.GridModule
+using HydrodynamicTransport.StateModule
+using HydrodynamicTransport.VectorOperationsModule
+using HydrodynamicTransport.BoundaryConditionsModule
+using HydrodynamicTransport.HorizontalTransportModule
+using HydrodynamicTransport.VerticalTransportModule
+using HydrodynamicTransport.SourceSinkModule
+using HydrodynamicTransport.HydrodynamicsModule
+using HydrodynamicTransport.TimeSteppingModule
+using HydrodynamicTransport.UtilsModule
+
+
+@testset "HydrodynamicTransport.jl Full Test Suite" begin
+
+# ==============================================================================
+# --- TESTSET 1: Core Components (Cartesian Grid) ---
+# ==============================================================================
+@testset "1. Core Components (Cartesian Grid)" begin
+    @info "Running Testset 1: Core Components..."
+    
+    grid = initialize_cartesian_grid(20, 20, 5, 100.0, 100.0, 10.0)
+    state = initialize_state(grid, (:C,))
+    
+    @testset "Initialization" begin
+        @test state.tracers[:C] isa Array{Float64, 3}
+        @test haskey(state._buffers, :C)
+        @test size(state.tracers[:C]) == size(state._buffers[:C])
+    end
+
+    @testset "Physics and Mass Conservation" begin
+        sources = [PointSource(i=5, j=10, k=1, tracer_name=:C, influx_rate=(t)->100.0)]
+        bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West)]
+        
+        initial_mass = sum(state.tracers[:C] .* grid.volume)
+        @test initial_mass == 0.0
+        
+        dt = 0.5; n_steps = 10
+        for _ in 1:n_steps
+            state.time += dt
+            apply_boundary_conditions!(state, grid, bcs)
+            update_hydrodynamics_placeholder!(state, grid, state.time)
+            horizontal_transport!(state, grid, dt, :TVD) # Test with default
+            vertical_transport!(state, grid, dt)
+            source_sink_terms!(state, grid, sources, state.time, dt)
+        end
+        
+        final_mass = sum(state.tracers[:C] .* grid.volume)
+        expected_mass_added = 100.0 * dt * n_steps
+        @test !any(isnan, state.tracers[:C])
+        @test final_mass > 0.0 && final_mass <= expected_mass_added 
+    end
+end
+
+
+# ==============================================================================
+# --- TESTSET 2: Hydrodynamics Temporal Interpolation ---
+# ==============================================================================
+@testset "2. Hydrodynamics Temporal Interpolation" begin
+    @info "Running Testset 2: Hydrodynamics Temporal Interpolation..."
+    
+    function create_test_netcdf(filename::String; nx=1, ny=1, nz=1)
+        ds = NCDataset(filename, "c")
+        defDim(ds, "xi_u", nx); defDim(ds, "eta_u", ny); defDim(ds, "s_rho", nz); defDim(ds, "ocean_time", 2)
+        defVar(ds, "ocean_time", [0.0, 10.0], ("ocean_time",))
+        u_var = defVar(ds, "u", Float64, ("xi_u", "eta_u", "s_rho", "ocean_time"))
+        u_var[:,:,:,1] = fill(1.0, (nx, ny, nz)); u_var[:,:,:,2] = fill(3.0, (nx, ny, nz))
+        close(ds)
+    end
+    
+    mktempdir() do temp_dir
+        filename = joinpath(temp_dir, "test_hydro.nc")
+        create_test_netcdf(filename)
+
+        ng = 2
+        grid = CurvilinearGrid(ng, 1, 1, 1, zeros(1+2ng, 1+2ng), zeros(1+2ng, 1+2ng), zeros(1-1+2ng, 1+2ng), zeros(1-1+2ng, 1+2ng), zeros(1+2ng, 1-1+2ng), zeros(1+2ng, 1-1+2ng), [-1.0, 0.0], ones(1+2ng, 1+2ng), ones(1+2ng, 1+2ng), zeros(1+2ng, 1+2ng), ones(1+2ng, 1+2ng), trues(1+2ng, 1+2ng), trues(1-1+2ng, 1+2ng), trues(1+2ng, 1-1+2ng), zeros(1+1+2ng, 1+2ng, 1), zeros(1+2ng, 1+1+2ng, 1), zeros(1+2ng, 1+2ng, 1))
+        state = initialize_state(grid, ())
+        ds = NCDataset(filename)
+        hydro_data = HydrodynamicData(filename, Dict(:u => "u", :time => "ocean_time"))
+
+        # Test midpoint interpolation
+        state.time = 5.0
+        update_hydrodynamics!(state, grid, ds, hydro_data, state.time)
+        u_physical = state.u[ng+1:grid.nx+ng, ng+1:grid.ny+ng, :]
+        @test all(isapprox.(u_physical, 2.0))
+
+        # Test clamping before start
+        state.time = -1.0
+        update_hydrodynamics!(state, grid, ds, hydro_data, state.time)
+        u_physical = state.u[ng+1:grid.nx+ng, ng+1:grid.ny+ng, :]
+        @test all(isapprox.(u_physical, 1.0))
+
+        # Test clamping after end
+        state.time = 11.0
+        update_hydrodynamics!(state, grid, ds, hydro_data, state.time)
+        u_physical = state.u[ng+1:grid.nx+ng, ng+1:grid.ny+ng, :]
+        @test all(isapprox.(u_physical, 3.0))
+
+        close(ds)
+    end
+end
+
+
+# ==============================================================================
+# --- TESTSET 3: Curvilinear Grid and Vector Operations ---
+# ==============================================================================
+@testset "3. Curvilinear Grid and Vector Operations" begin
+    @info "Running Testset 3: Vector Rotation Round-Trip..."
+    nx, ny, nz, ng = 10, 10, 1, 2
+    angle = fill(π/4, (nx + 2*ng, ny + 2*ng))
+    dummy_grid = CurvilinearGrid(ng, nx, ny, nz, zeros(nx+2ng, ny+2ng), zeros(nx+2ng, ny+2ng), zeros(nx-1+2ng, ny+2ng), zeros(nx-1+2ng, ny+2ng), zeros(nx+2ng, ny-1+2ng), zeros(nx+2ng, ny-1+2ng), [-1.0, 0.0], ones(nx+2ng, ny+2ng), ones(nx+2ng, ny+2ng), angle, ones(nx+2ng, ny+2ng), trues(nx+2ng, ny+2ng), trues(nx-1+2ng, ny+2ng), trues(nx+2ng, ny-1+2ng), zeros(nx+1+2ng, ny+2ng, nz), zeros(nx+2ng, ny+1+2ng, nz), zeros(nx+2ng, ny+2ng, nz))
+    state = initialize_state(dummy_grid, ())
+
+    u_east_initial = ones(Float64, nx, ny, nz)
+    v_north_initial = zeros(Float64, nx, ny, nz)
+
+    rotate_velocities_to_grid!(state.u, state.v, dummy_grid, u_east_initial, v_north_initial)
+    u_east_final, v_north_final = rotate_velocities_to_geographic(dummy_grid, state.u, state.v)
+
+    @test u_east_final ≈ u_east_initial
+    @test v_north_final ≈ v_north_initial atol=1e-12
+end
+
+
+# ==============================================================================
+# --- TESTSET 4 & 5: File I/O, Utilities, and Full Simulations ---
+# ==============================================================================
+# We use a temporary directory to ensure our test is clean and leaves no files behind
+mktempdir() do temp_dir
+    @info "Running Testsets 4 & 5 in temporary directory: $temp_dir"
+    
+    # --- Setup: Generate the test dataset ---
+    braided_river_file = joinpath(temp_dir, "braided_river_data.nc")
+    
+    # We bring the dataset generator function into this scope
+    # In a real package, this might be in a separate test/test_utils.jl file
+    include(joinpath(@__DIR__, "run_braided_river_test.jl"))
+    generate_and_write_dataset(braided_river_file, "temp_plot.png")
+
+    @testset "4. File I/O and Utility Functions" begin
+        @info "Running Testset 4: Utilities on generated NetCDF..."
+        @test isfile(braided_river_file)
+        hydro_data = create_hydrodynamic_data_from_file(braided_river_file)
+        @test hydro_data isa HydrodynamicData && hydro_data.var_map[:u] == "u"
+        safe_dt = estimate_stable_timestep(braided_river_file)
+        @test safe_dt > 0 && safe_dt < 30.0
+    end
+
+    @testset "5. End-to-End Simulations" begin
+        ds = NCDataset(braided_river_file)
+        grid = initialize_curvilinear_grid(braided_river_file)
+        hydro_data = create_hydrodynamic_data_from_file(braided_river_file)
+        sources = [PointSource(i=45, j=40, k=1, tracer_name=:Tracer, influx_rate=(t)->1.0e4)]
+        bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West)]
+        dt = estimate_stable_timestep(braided_river_file)
+        
+        @testset "TVD Scheme (Default)" begin
+            @info "Running End-to-End Test with :TVD scheme..."
+            state_tvd = initialize_state(grid, ds, (:Tracer,))
+            final_state_tvd = run_simulation(grid, state_tvd, sources, ds, hydro_data, 0.0, 3*3600.0, dt, boundary_conditions=bcs, advection_scheme=:TVD)
+            
+            @test !any(isnan, final_state_tvd.tracers[:Tracer])
+            mask = grid.mask_rho
+            land_indices = findall(iszero, mask)
+            @test all(final_state_tvd.tracers[:Tracer][land_indices] .== 0.0)
+        end
+
+        @testset "UP3 Scheme" begin
+            @info "Running End-to-End Test with :UP3 scheme..."
+            state_up3 = initialize_state(grid, ds, (:Tracer,))
+            final_state_up3 = run_simulation(grid, state_up3, sources, ds, hydro_data, 0.0, 3*3600.0, dt, boundary_conditions=bcs, advection_scheme=:UP3)
+            
+            @test !any(isnan, final_state_up3.tracers[:Tracer])
+            mask = grid.mask_rho
+            land_indices = findall(iszero, mask)
+            @test all(final_state_up3.tracers[:Tracer][land_indices] .== 0.0)
+        end
+
+        close(ds)
+    end
+end
+
+println("\n✅ ✅ ✅ HydrodynamicTransport.jl: All tests passed successfully! ✅ ✅ ✅")
+
+end # End of the full test suite
+</file>
+
+<file path="src/Hydrodynamics.jl">
+# src/Hydrodynamics.jl
+
+module HydrodynamicsModule
+
+export update_hydrodynamics!, update_hydrodynamics_placeholder!
+
+using ..HydrodynamicTransport.ModelStructs
+using NCDatasets
+using Dates
+
+# --- The placeholder functions for CartesianGrid remain unchanged ---
+function update_hydrodynamics_placeholder!(state::State, grid::CartesianGrid, time::Float64)
+    ng = grid.ng
+    nx, ny, nz = grid.dims
+    nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+    
+    dx = (grid.x[ng+2, ng+1, 1] - grid.x[ng+1, ng+1, 1])
+    dy = (grid.y[ng+1, ng+2, 1] - grid.y[ng+1, ng+1, 1])
+    Lx = nx * dx; Ly = ny * dy
+    center_x = Lx / 2; center_y = Ly / 2
+    period = 200.0; omega = 2π / period
+    
+    for k in 1:nz, j_glob in 1:ny_tot, i_glob in 1:nx_tot+1
+        i_phys_face = i_glob - ng - 0.5; j_phys_center = j_glob - ng
+        x_coord_face = i_phys_face * dx; y_coord_center = (j_phys_center - 0.5) * dy
+        rx = x_coord_face - center_x; ry = y_coord_center - center_y
+        state.u[i_glob, j_glob, k] = -omega * ry
+    end
+
+    for k in 1:nz, j_glob in 1:ny_tot+1, i_glob in 1:nx_tot
+        i_phys_center = i_glob - ng; j_phys_face = j_glob - ng - 0.5
+        x_coord_center = (i_phys_center - 0.5) * dx; y_coord_face = j_phys_face * dy
+        rx = x_coord_center - center_x; ry = y_coord_face - center_y
+        state.v[i_glob, j_glob, k] = omega * rx
+    end
+    state.w .= 0.0
+    state.zeta .= 0.0
+end
+
+function update_hydrodynamics_placeholder!(state::State, grid::CurvilinearGrid, time::Float64)
+    @warn "Placeholder hydrodynamics for CurvilinearGrid is not implemented. Setting velocities to zero."
+    state.u .= 0.0; state.v .= 0.0; state.w .= 0.0; state.zeta .= 0.0
+end
+
+
+# --- Refactored Real Data Hydrodynamics with Corrected Interpolation ---
+function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
+    ng = grid.ng
+    time_var_name = get(hydro_data.var_map, :time, "time"); time_dim_raw = ds[time_var_name][:]
+    time_dim_seconds = if eltype(time_dim_raw) <: DateTime; t0 = time_dim_raw[1]; [(dt - t0).value / 1000.0 for dt in time_dim_raw]; else; time_dim_raw; end
+    local idx1, idx2, weight; n_times = length(time_dim_seconds)
+    if time <= time_dim_seconds[1]; idx1 = 1; idx2 = 1; weight = 0.0
+    elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
+    else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
+    
+    # --- UPDATED: Use dimension names from MARS3D file ---
+    fields_to_load = [
+        (state.u, :u, "ni_u", "nj_u", "level"),
+        (state.v, :v, "ni_v", "nj_v", "level"),
+        (state.temperature, :temp, "ni", "nj", "level"),
+        (state.salinity, :salt, "ni", "nj", "level"),
+        (state.zeta, :zeta, "ni", "nj", nothing), # Special case for 2D field
+    ]
+
+    for (state_field, standard_name, x_dim, y_dim, z_dim) in fields_to_load
+        if haskey(hydro_data.var_map, standard_name)
+            nc_var_name = hydro_data.var_map[standard_name]
+            if haskey(ds, nc_var_name)
+                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]
+                
+                if z_dim !== nothing # Handle 3D fields (u, v, temp, salt)
+                    nz_phys = ds.dim[z_dim]
+                    interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
+                    data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
+                    if weight > 1e-9
+                        data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0)
+                        interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
+                    else
+                        interior_view .= data_slice1
+                    end
+                else # Handle 2D fields (zeta)
+                    interior_view_3d = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, :)
+                    data_slice1_2d = coalesce.(ds[nc_var_name][:, :, idx1], 0.0)
+                    
+                    local interpolated_data_2d
+                    if weight > 1e-9
+                        data_slice2_2d = coalesce.(ds[nc_var_name][:, :, idx2], 0.0)
+                        interpolated_data_2d = (1.0 - weight) .* data_slice1_2d .+ weight .* data_slice2_2d
+                    else
+                        interpolated_data_2d = data_slice1_2d
+                    end
+                    
+                    # Broadcast the 2D data across the 3D state array's vertical dimension
+                    for k in 1:size(interior_view_3d, 3)
+                        view(interior_view_3d, :, :, k) .= interpolated_data_2d
+                    end
+                end
+            else
+                @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."
+            end
+        end
+    end
+    return nothing
+end
+
+end # module HydrodynamicsModule
+</file>
+
+<file path="src/previr_SCRIPTING.jl">
+# run_loire_simulation.jl
+
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+using Revise
+using HydrodynamicTransport
+using NCDatasets
+
+println("--- HydrodynamicTransport.jl: Loire Estuary Sorption & Sedimentation Simulation ---")
+
+# --- 1. Data Configuration ---
+# IMPORTANT: Update this path to the location of your NetCDF file.
+loire_filepath = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
+
+println("Autodetecting variables from: $loire_filepath")
+hydro_data = create_hydrodynamic_data_from_file(loire_filepath)
+
+# --- 2. Grid and State Initialization ---
+println("Connecting to NetCDF file...")
+ds = NCDataset(loire_filepath)
+
+println("Initializing Curvilinear Grid...")
+grid = initialize_curvilinear_grid(loire_filepath)
+
+println("Initializing State with Dissolved and Sorbed tracers...")
+# Define all tracers for the simulation
+tracer_names = (:Virus_Dissolved, :Virus_Sorbed)
+# Specify that :Virus_Sorbed has a corresponding bed_mass array
+sediment_tracer_list = [:Virus_Sorbed]
+state = initialize_state(grid, ds, tracer_names; sediment_tracers=sediment_tracer_list)
+
+# Set a uniform background TSS concentration (e.g., 5.0 g/m^3)
+# A real simulation might read this from the NetCDF file if available.
+state.tss .= 5.0
+
+# --- 3. Source Configuration ---
+# The source only introduces the DISSOLVED form of the virus.
+println("Configuring point source for dissolved virus...")
+sources = PointSource[]
+source_locations = [
+    (name = "Nantes",        lon = -1.549464,  lat = 47.197319),
+    (name = "Saint-Nazaire", lon = -2.28,      lat = 47.27),
+    (name = "Cordemais",     lon = -1.97,      lat = 47.28)
+]
+
+for loc in source_locations
+    i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
+    if i !== nothing && j !== nothing
+        println("  -> Source '$(loc.name)' placed at grid indices (i=$i, j=$j)")
+        push!(
+            sources,
+            PointSource(i=i, j=j, k=grid.nz, tracer_name=:Virus_Dissolved, influx_rate=(t)->1.0e10, relocate_if_dry=true)
+        )
+    else
+        println("  -> Warning: Could not find grid indices for source '$(loc.name)'.")
+    end
+end
+
+# --- 4. Define Sediment Parameters for the Sorbed Tracer ---
+println("Defining sediment parameters for :Virus_Sorbed...")
+# NOTE: These parameters have been adapted to the `SedimentParams` struct in ModelStructs.jl
+sediment_params = Dict(
+    :Virus_Sorbed => SedimentParams(
+        ws = 0.0005,           # Settling velocity (ws) in m/s (e.g., 0.5 mm/s)
+        erosion_rate = 1e-7,   # Constant erosion rate in kg/m^2/s (a value for the simple bed model)
+        tau_ce = 0.1           # Critical shear stress for erosion (Pa), for future, more advanced bed models
+    )
+)
+
+# --- 5. Define the Adsorption/Desorption Functional Interaction ---
+println("Defining adsorption-desorption interaction function...")
+# This function calculates the mass transfer between dissolved and sorbed forms.
+function implicit_adsorption_desorption(concentrations, environment, dt)
+    C_diss_old = max(0.0, concentrations[:Virus_Dissolved])
+    C_sorb_old = max(0.0, concentrations[:Virus_Sorbed])
+    TSS = environment.TSS; Kd = 0.2; transfer_rate = 0.0001
+    
+    C_total = C_diss_old + C_sorb_old
+    if C_total <= 1e-12; return Dict(:Virus_Dissolved => 0.0, :Virus_Sorbed => 0.0); end
+    
+    alpha = dt * transfer_rate; beta = Kd * TSS
+    
+    # Implicit solution for the new sorbed concentration
+    numerator = C_sorb_old + alpha * beta * C_total
+    denominator = 1.0 + alpha * (1.0 + beta)
+    C_sorb_new = numerator / denominator
+    
+    delta_C = C_sorb_new - C_sorb_old
+
+    # This check is critical to prevent the reaction from creating/destroying mass
+    if delta_C > 0 # Adsorption (dissolved -> sorbed)
+        delta_C = min(delta_C, C_diss_old)
+    else # Desorption (sorbed -> dissolved)
+        delta_C = max(delta_C, -C_sorb_old)
+    end
+    
+    return Dict(:Virus_Dissolved => -delta_C, :Virus_Sorbed => +delta_C)
+end
+
+virus_interaction = FunctionalInteraction(
+    affected_tracers = [:Virus_Dissolved, :Virus_Sorbed],
+    interaction_function = implicit_adsorption_desorption
+)
+functional_interactions = [virus_interaction]
+
+# --- 6. Simulation and Output Parameters ---
+start_time = 0.0
+end_time = 12*60.0 # Run for 12 hours
+dt = 6.0             # Use a large timestep, enabled by the implicit schemes
+
+bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
+
+# IMPORTANT: Update this path to your desired output location.
+output_directory = raw"D:\PreVir\loire_virus_sim_output"
+output_interval_seconds = 30 * 60.0 # Save output every 30 minutes
+
+# --- 7. Run the Simulation ---
+println("\n--- Starting simulation ---")
+println("Total duration: $(end_time / 3600.0) hours")
+println("Time step (dt): $dt seconds")
+println("Output will be saved to: $output_directory")
+
+final_state = run_simulation(
+    grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
+    boundary_conditions     = bcs,
+    sediment_params         = sediment_params,
+    functional_interactions = functional_interactions,
+    advection_scheme        = :TVD,
+    D_crit                  = 0.05,
+    output_dir              = output_directory,
+    output_interval         = output_interval_seconds,
+    restart_from            = nothing
+)
+
+# --- 8. Clean Up and Summarize ---
+close(ds)
+
+println("\n--- Simulation Complete ---")
+println("Final simulation time: $(round(final_state.time / 3600.0, digits=2)) hours.")
+
+total_dissolved_mass = sum(final_state.tracers[:Virus_Dissolved])
+total_sorbed_water_mass = sum(final_state.tracers[:Virus_Sorbed])
+total_bed_mass = sum(final_state.bed_mass[:Virus_Sorbed])
+
+using UnicodePlots
+
+heatmap(
+    final_state.tracers[:Virus_Dissolved][:, :, 1],
+    width = 50
+)
+
+println("Total dissolved virus mass: ", total_dissolved_mass)
+println("Total sorbed virus mass in water: ", total_sorbed_water_mass)
+println("Total sorbed virus mass in bed: ", total_bed_mass)
+println("Total virus mass in system: ", total_dissolved_mass + total_sorbed_water_mass + total_bed_mass)
+</file>
+
+<file path="src/ModelStructs.jl">
+# src/ModelStructs.jl
+
+module ModelStructs
+
+export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
+       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
+
+using StaticArrays
+using Base: @kwdef
+
+abstract type AbstractGrid end
+
+struct CartesianGrid <: AbstractGrid
+    ng::Int # Number of ghost cells
+    dims::SVector{3, Int}
+    x::Array{Float64, 3}; y::Array{Float64, 3}; z::Array{Float64, 3}
+    volume::Array{Float64, 3}
+    face_area_x::Array{Float64, 3}; face_area_y::Array{Float64, 3}; face_area_z::Array{Float64, 3}
+    mask::Array{Bool, 3}
+end
+
+struct CurvilinearGrid <: AbstractGrid
+    ng::Int # Number of ghost cells
+    nx::Int; ny::Int; nz::Int
+    lon_rho::Array{Float64, 2}; lat_rho::Array{Float64, 2}
+    lon_u::Array{Float64, 2}; lat_u::Array{Float64, 2}
+    lon_v::Array{Float64, 2}; lat_v::Array{Float64, 2}
+    z_w::Vector{Float64}
+    pm::Array{Float64, 2}; pn::Array{Float64, 2}
+    angle::Array{Float64, 2}
+    h::Array{Float64, 2}
+    mask_rho::Array{Bool, 2}; mask_u::Array{Bool, 2}; mask_v::Array{Bool, 2}
+    face_area_x::Array{Float64, 3}; face_area_y::Array{Float64, 3}
+    volume::Array{Float64, 3}
+end
+
+mutable struct State
+    tracers::Dict{Symbol, Array{Float64, 3}}
+    _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary tracer calculations
+    u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
+    zeta::Array{Float64, 3}
+    flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
+    flux_y::Array{Float64, 3} # Pre-allocated buffer for y-direction fluxes
+    flux_z::Array{Float64, 3} # Pre-allocated buffer for z-direction fluxes
+    temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
+    tss::Array{Float64, 3}; uvb::Array{Float64, 3}
+    time::Float64
+    bed_mass::Dict{Symbol, Array{Float64, 2}} # NEW: Mass per unit area (kg/m^2)
+end
+
+@kwdef struct PointSource
+    i::Int; j::Int; k::Int # Physical indices (1-based from the corner of the physical domain)
+    tracer_name::Symbol
+    influx_rate::Function # time -> value
+    relocate_if_dry::Bool = false
+end
+
+@kwdef struct FunctionalInteraction
+    affected_tracers::Vector{Symbol}
+    interaction_function::Function
+end
+
+"""
+    DecayParams
+
+Parameters for a first-order tracer decay model where the decay rate can depend on
+temperature and sunlight. This struct is designed to be used with the `FunctionalInteraction`
+framework.
+
+# Example
+```julia
+# Configure decay for a tracer named :Virus
+# It has a base 5-day half-life at 20°C and is sensitive to temperature.
+decay_for_virus = DecayParams(
+    tracer_name = :Virus,
+    base_rate = 1.0 / (5 * 24 * 3600.0), # Convert 5-day half-life to 1/s
+    temp_theta = 1.07,
+    light_coeff = 0.0 # No light dependence in this example
+)
+"""
+@kwdef struct DecayParams
+    tracer_name::Symbol
+    base_rate::Float64 = 0.0
+    temp_ref::Float64 = 20.0
+    temp_theta::Float64 = 1.0
+    light_coeff::Float64 = 0.0 
+end
+
+# NEW: Parameters for sediment tracers
+@kwdef struct SedimentParams
+    ws::Float64             # Settling velocity (m/s, positive downwards)
+    erosion_rate::Float64   # A simple constant erosion rate (kg/m^2/s)
+    tau_ce::Float64 = 0.05  # Critical shear stress for erosion (Pa)
+end
+
+@kwdef struct OysterParams
+    wdw::Float64 = 0.5
+    ϵ_free::Float64 = 0.01
+    ϵ_sorbed::Float64 = 0.8
+    tss_reject::Float64 = 5.0
+    tss_clog::Float64 = 100.0
+    kdep_20::Float64 = 0.23
+    θ_dep::Float64 = 1.07
+end
+
+mutable struct OysterState
+    c_oyster::Float64
+end
+
+struct VirtualOyster
+    i::Int
+    j::Int
+    k::Int
+    params::OysterParams
+    state::OysterState
+end
+
+abstract type BoundaryCondition end
+
+@kwdef struct OpenBoundary <: BoundaryCondition
+    side::Symbol # :West, :East, :North, or :South
+end
+
+@kwdef struct RiverBoundary <: BoundaryCondition
+    side::Symbol
+    tracer_name::Symbol
+    indices::UnitRange{Int} # Range of physical grid cells for the river (e.g., 40:50)
+    concentration::Function # time -> value
+    velocity::Function      # time -> value (normal to the boundary, positive is inflow)
+end
+
+@kwdef struct TidalBoundary <: BoundaryCondition
+    side::Symbol
+    # A function of time that returns a Dict of tracer concentrations for INFLOWING water
+    inflow_concentrations::Function # e.g., t -> Dict(:Salinity => 35.0, :TracerX => 0.0)
+end
+
+struct HydrodynamicData
+    filepath::String
+    var_map::Dict{Symbol, String}
+end
+
+end # module ModelStructs
+</file>
+
+<file path="src/HydrodynamicTransport.jl">
+# src/HydrodynamicTransport.jl
+
+module HydrodynamicTransport
+
+# --- 1. Include all source files to define the modules ---
+include("ModelStructs.jl")
+include("GridModule.jl")
+include("StateModule.jl")
+include("VectorOperationsModule.jl")
+include("BoundaryConditionsModule.jl")
+include("HorizontalTransportModule.jl")
+include("VerticalTransportModule.jl")
+include("SourceSinkModule.jl")
+include("Hydrodynamics.jl")
+
+# --- ADDED FOR SEDIMENTATION ---
+include("SettlingModule.jl")
+include("BedExchangeModule.jl")
+# ---------------------------------
+# Added oyster
+include("OysterModule.jl")
+
+include("TimeSteppingModule.jl")
+include("UtilsModule.jl") 
+
+
+# Bring the contents of the modules into the main module's scope ---
+using .ModelStructs
+using .GridModule
+using .StateModule
+using .VectorOperationsModule
+using .BoundaryConditionsModule
+using .HorizontalTransportModule
+using .VerticalTransportModule
+using .SourceSinkModule
+using .HydrodynamicsModule
+using .OysterModule
+using .TimeSteppingModule
+using .UtilsModule
+# Note: The new modules are used internally by TimeSteppingModule,
+# so they don't need to be brought into the main scope with 'using' here.
+
+
+# Export the public API 
+# Types from ModelStructs.jl
+export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
+       BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
+       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
+       
+# Functions from GridModule.jl
+export initialize_cartesian_grid, initialize_curvilinear_grid
+
+# Functions from StateModule.jl
+export initialize_state
+
+# Functions from VectorOperationsModule.jl
+export rotate_velocities_to_geographic
+
+# Functions from TimeSteppingModule.jl
+export run_simulation, run_and_store_simulation
+
+# Functions from UtilsModule.jl
+export estimate_stable_timestep, create_hydrodynamic_data_from_file, lonlat_to_ij
+
+
+end # module HydrodynamicTransport
+</file>
+
+<file path="src/HorizontalTransportModule.jl">
+# src/HorizontalTransportModule.jl
+
+module HorizontalTransportModule
+
+export horizontal_transport!
+
+using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.BoundaryConditionsModule: apply_intermediate_boundary_conditions!
+using StaticArrays
+using Logging
+using LinearAlgebra
+
+
+"""
+    horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
+
+Computes the change in tracer concentrations due to horizontal transport processes
+(advection and diffusion) over a single time step.
+
+This function acts as the main dispatcher for horizontal transport. It uses operator
+splitting to solve the transport equation.
+
+The specific advection algorithm is chosen via the `scheme` argument.
+
+# Arguments
+- `state::State`: The model state, which is modified in-place.
+- `grid::AbstractGrid`: The computational grid.
+- `dt::Float64`: The time step duration.
+- `scheme::Symbol`: The advection scheme to use. Options are `:TVD`, `:UP3`, and `:ImplicitADI`.
+- `D_crit::Float64`: Critical depth for wet/dry cells.
+- `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions.
+
+# Returns
+- `nothing`: The function modifies `state.tracers` in-place.
+"""
+function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
+    Kh = 1.0 
+    for tracer_name in keys(state.tracers)
+        C_initial = state.tracers[tracer_name]
+        C_intermediate = state._buffers[tracer_name] # Re-using buffer
+        
+        # --- Advection Step ---
+        if scheme == :TVD
+            advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
+            advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
+        elseif scheme == :UP3
+            advect_x_up3!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
+            advect_y_up3!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
+        elseif scheme == :ImplicitADI
+            # Step 1: Implicit X-Sweep: (I - dt*L_x) * C_intermediate = C_initial
+            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+
+            # Step 1.5: Handle Boundary Conditions for the Intermediate Variable
+            apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
+
+            # Step 2: Implicit Y-Sweep: (I - dt*L_y) * C_final = C_intermediate
+            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt) # Result stored back in C_initial
+        else
+            error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
+        end
+        
+        # --- Diffusion Step (common to all schemes) ---
+        # The result of advection is in C_initial (now C_final_advection)
+        # We use C_intermediate as the buffer again.
+        diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, state.flux_x, D_crit)
+        diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, state.flux_y, D_crit)
+    end
+    return nothing
+end
+
+
+# --- Stencil Functions (inlined for performance) ---
+@inline function get_stencil_x(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
+    @inbounds return C[i_glob-2, j_glob, k], C[i_glob-1, j_glob, k], C[i_glob, j_glob, k], C[i_glob+1, j_glob, k], C[i_glob+2, j_glob, k]
+end
+
+@inline function get_stencil_y(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
+    @inbounds return C[i_glob, j_glob-2, k], C[i_glob, j_glob-1, k], C[i_glob, j_glob, k], C[i_glob, j_glob+1, k], C[i_glob, j_glob+2, k]
+end
+
+
+# ==============================================================================
+# --- SCHEME 1: Upstream-Biased 3rd-Order (UP3) ---
+# ==============================================================================
+
+function advect_x_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes_x, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+    fluxes_x .= 0.0 # Clear the buffer
+
+    @inbounds for k in axes(C_in, 3), j_phys in 1:ny
+        j_glob = j_phys + ng
+        # --- Interior Faces (3rd-Order Upstream) ---
+        for i_phys in 2:nx
+            i_glob = i_phys + ng
+            velocity = u[i_glob, j_glob, k]
+            
+            # --- Cell-Face Blocking Logic ---
+            if isa(grid, CurvilinearGrid)
+                if velocity > 0 # Flow is from left to right, check the left cell
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                    if upstream_depth < D_crit; velocity = 0.0; end
+                elseif velocity < 0 # Flow is from right to left, check the right cell
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; velocity = 0.0; end
+                end
+            end
+            # --- End Cell-Face Blocking ---
+
+            local C_face
+            if velocity >= 0 # Flow is from left to right
+                C_face = (2*C_in[i_glob, j_glob, k] + 5*C_in[i_glob-1, j_glob, k] - C_in[i_glob-2, j_glob, k]) / 6
+            else # Flow is from right to left
+                C_face = (2*C_in[i_glob-1, j_glob, k] + 5*C_in[i_glob, j_glob, k] - C_in[i_glob+1, j_glob, k]) / 6
+            end
+            fluxes_x[i_glob, j_glob, k] = velocity * C_face * grid.face_area_x[i_glob, j_glob, k]
+        end
+
+        # --- Boundary Faces (1st-Order Upwind Fallback) ---
+        for i_phys in [1, nx+1]
+            i_glob = i_phys + ng
+            vel = u[i_glob, j_glob, k]
+
+            # --- Cell-Face Blocking Logic ---
+            if isa(grid, CurvilinearGrid)
+                if vel > 0 # Flow L->R, upstream cell is i_glob-1
+                    upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                elseif vel < 0 # Flow R->L, upstream cell is i_glob
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                end
+            end
+            # --- End Cell-Face Blocking ---
+
+            C_face = (vel >= 0) ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]
+            fluxes_x[i_glob, j_glob, k] = vel * C_face * grid.face_area_x[i_glob, j_glob, k]
+        end
+    end
+
+    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
+        if grid.volume[i_glob, j_glob, k] > 0
+             C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+        else
+             C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k]
+        end
+    end
+end
+
+function advect_y_up3!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes_y, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+    fluxes_y .= 0.0 # Clear the buffer
+
+    @inbounds for k in axes(C_in, 3), i_phys in 1:nx
+        i_glob = i_phys + ng
+        # --- Interior Faces (3rd-Order Upstream) ---
+        for j_phys in 2:ny
+            j_glob = j_phys + ng
+            velocity = v[i_glob, j_glob, k]
+            
+            # --- Cell-Face Blocking Logic ---
+            if isa(grid, CurvilinearGrid)
+                if velocity > 0 # Flow is from bottom to top, check bottom cell
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                    if upstream_depth < D_crit; velocity = 0.0; end
+                elseif velocity < 0 # Flow is from top to bottom, check top cell
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; velocity = 0.0; end
+                end
+            end
+            # --- End Cell-Face Blocking ---
+
+            local C_face
+            if velocity >= 0 # Flow is from bottom to top
+                C_face = (2*C_in[i_glob, j_glob, k] + 5*C_in[i_glob, j_glob-1, k] - C_in[i_glob, j_glob-2, k]) / 6
+            else # Flow is from top to bottom
+                C_face = (2*C_in[i_glob, j_glob-1, k] + 5*C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob+1, k]) / 6
+            end
+            fluxes_y[i_glob, j_glob, k] = velocity * C_face * grid.face_area_y[i_glob, j_glob, k]
+        end
+
+        # --- Boundary Faces (1st-Order Upwind Fallback) ---
+        for j_phys in [1, ny+1]
+            j_glob = j_phys + ng
+            vel = v[i_glob, j_glob, k]
+            
+            # --- Cell-Face Blocking Logic ---
+            if isa(grid, CurvilinearGrid)
+                if vel > 0 # Flow bottom->top, upstream cell is j_glob-1
+                    upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                elseif vel < 0 # Flow top->bottom, upstream cell is j_glob
+                    upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                    if upstream_depth < D_crit; vel = 0.0; end
+                end
+            end
+            # --- End Cell-Face Blocking ---
+
+            C_face = (vel >= 0) ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]
+            fluxes_y[i_glob, j_glob, k] = vel * C_face * grid.face_area_y[i_glob, j_glob, k]
+        end
+    end
+    
+    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
+        if grid.volume[i_glob, j_glob, k] > 0
+            C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+        else
+            C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k]
+        end
+    end
+end
+
+
+# ==============================================================================
+# --- SCHEME 2: Total Variation Diminishing (TVD) based on Bott Scheme ---
+# ==============================================================================
+
+"""
+    calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
+
+Calculates the coefficients of a 4th-order polynomial that interpolates the
+concentration profile over a 5-point stencil. This is a core component of the
+Bott (1989) advection scheme.
+
+# Arguments
+- `c_im2`, `c_im1`, `c_i`, `c_ip1`, `c_ip2`: Concentration values at five consecutive
+  grid points (i-2, i-1, i, i+1, i+2).
+
+# Returns
+- `(a0, a1, a2, a3, a4)`: A tuple of the five polynomial coefficients.
+"""
+@inline function calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
+    a1 = (c_ip1 - c_im1) / 2.0
+    a3 = (c_ip2 - 2*c_ip1 + 2*c_im1 - c_im2) / 12.0 - (2/3.0) * a1
+    a4 = (c_ip2 - 4*c_ip1 + 6*c_i - 4*c_im1 + c_im2) / 24.0
+    a0 = c_i - a4; a2 = a4
+    return a0, a1, a2, a3, a4
+end
+
+"""
+    _indefinite_integral_poly4(xi, a0, a1, a2, a3, a4)
+
+Analytically computes the indefinite integral of the 4th-order polynomial defined
+by the given coefficients. The integration is performed with respect to the normalized
+coordinate `xi`.
+
+# Arguments
+- `xi`: The normalized coordinate (from -0.5 to 0.5) at which to evaluate the integral.
+- `a0` to `a4`: The coefficients of the polynomial.
+
+# Returns
+- `Float64`: The value of the indefinite integral at `xi`.
+"""
+@inline function _indefinite_integral_poly4(xi, a0, a1, a2, a3, a4)
+    return xi * (a0 + xi/2 * (a1 + xi/3 * (a2 + xi/4 * (a3 + xi/5 * a4))))
+end
+
+
+"""
+    advect_x_tvd!(C_out, C_in, u, grid, dt)
+
+Performs advection in the x-direction using a Total Variation Diminishing (TVD)
+scheme based on the work of Bott (1989).
+
+This function calculates advective fluxes across x-faces. For the deep interior of
+the domain, it employs a high-order method:
+1.  A 4th-order polynomial is fitted to a 5-point stencil around the donor cell.
+2.  This polynomial is analytically integrated over the volume of fluid that crosses
+    the cell face during the time step to calculate a high-order flux.
+3.  A flux limiter (`phi`) is calculated to blend the high-order flux with a
+    low-order (1st-order upwind) flux. This ensures that the scheme is TVD,
+    preventing the formation of new, unphysical oscillations.
+4.  The final flux is constrained to be between the concentrations of the donor
+    and receiver cells to maintain monotonicity.
+
+For faces near the domain boundaries, the function reverts to a simple and robust
+1st-order upwind scheme.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `u`: The u-component of velocity.
+- `grid`: The computational grid.
+- `dt`: The time step.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
+function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes_x, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+    fluxes_x .= 0.0
+
+    # By adding Threads.@threads here, Julia will automatically and safely
+    # distribute the iterations of the k loop among the available threads.
+    Threads.@threads for k in axes(C_in, 3)
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+            # --- Interior Faces ---
+            for i_phys in 3:nx-1
+                i_glob = i_phys + ng
+                velocity = u[i_glob, j_glob, k]
+                if abs(velocity) < 1e-12; continue; end
+
+                if isa(grid, CurvilinearGrid)
+                    if velocity > 0 # Flow L->R
+                        upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    else # Flow R->L
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    end
+                end
+
+                donor_idx, receiver_idx = velocity >= 0 ? (i_glob - 1, i_glob) : (i_glob, i_glob - 1)
+                c_stencil = get_stencil_x(C_in, donor_idx, j_glob, k)
+                dx_donor = get_dx_at_face(grid, i_glob, j_glob)
+                a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
+                courant_abs = abs(velocity * dt / dx_donor)
+                if courant_abs > 1.0; courant_abs = 1.0; end
+                
+                integral_right, integral_left = if velocity >= 0
+                    _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
+                else
+                    _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
+                end
+                
+                C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
+                C_face_low_order = C_in[donor_idx, j_glob, k]
+                c_up_far=C_in[donor_idx - (velocity >= 0 ? 1 : -1), j_glob, k]
+                c_up_near=C_in[donor_idx, j_glob, k]
+                c_down_near=C_in[receiver_idx, j_glob, k]
+                r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
+                r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
+                phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
+                C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
+                C_max = max(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
+                C_min = min(C_in[donor_idx, j_glob, k], C_in[receiver_idx, j_glob, k])
+                fluxes_x[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_x[i_glob, j_glob, k]
+            end
+            
+            # --- Boundary Faces ---
+            for i_phys in [1, 2, nx, nx+1]
+                i_glob = i_phys + ng
+                vel = u[i_glob, j_glob, k]
+                if isa(grid, CurvilinearGrid)
+                    if vel > 0
+                        upstream_depth = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    elseif vel < 0
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    end
+                end
+                fluxes_x[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob-1, j_glob, k] : C_in[i_glob, j_glob, k]) * grid.face_area_x[i_glob, j_glob, k]
+            end
+        end
+    end
+
+    # This loop is also safe to parallelize for the same reasons.
+    Threads.@threads for k in axes(C_out, 3)
+        for j_phys in 1:ny
+            for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
+        end
+    end
+end
+
+function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes_y, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+    fluxes_y .= 0.0
+
+    # Here, we parallelize the loop over the vertical layers.
+    Threads.@threads for k in axes(C_in, 3)
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+            # --- Interior Faces ---
+            for j_phys in 3:ny-1
+                j_glob = j_phys + ng
+                velocity = v[i_glob, j_glob, k]
+                if abs(velocity) < 1e-12; continue; end
+
+                if isa(grid, CurvilinearGrid)
+                    if velocity > 0 # Flow bottom->top
+                        upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    else # Flow top->bottom
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; velocity = 0.0; end
+                    end
+                end
+
+                donor_idx, receiver_idx = velocity >= 0 ? (j_glob - 1, j_glob) : (j_glob, j_glob - 1)
+                c_stencil = get_stencil_y(C_in, i_glob, donor_idx, k)
+                dy_donor = get_dy_at_face(grid, i_glob, j_glob)
+                a0,a1,a2,a3,a4 = calculate_bott_coeffs(c_stencil...)
+                courant_abs = abs(velocity * dt / dy_donor)
+                if courant_abs > 1.0; courant_abs = 1.0; end
+                
+                integral_right, integral_left = if velocity >= 0
+                    _indefinite_integral_poly4(0.5, a0,a1,a2,a3,a4), _indefinite_integral_poly4(0.5-courant_abs, a0,a1,a2,a3,a4)
+                else
+                    _indefinite_integral_poly4(-0.5+courant_abs, a0,a1,a2,a3,a4), _indefinite_integral_poly4(-0.5, a0,a1,a2,a3,a4)
+                end
+
+                C_face_high_order = (integral_right - integral_left) / (courant_abs + 1e-12)
+                C_face_low_order = C_in[i_glob, donor_idx, k]
+                c_up_far=C_in[i_glob, donor_idx - (velocity >= 0 ? 1 : -1), k]
+                c_up_near=C_in[i_glob, donor_idx, k]
+                c_down_near=C_in[i_glob, receiver_idx, k]
+                r_numerator = c_up_near - c_up_far; r_denominator = c_down_near - c_up_near
+                r = abs(r_denominator) < 1e-9 ? 1.0 : r_numerator / r_denominator
+                phi = (r + abs(r)) / (1 + abs(r) + 1e-9)
+                C_face_tvd = C_face_low_order + 0.5 * phi * (C_face_high_order - C_face_low_order)
+                C_max = max(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
+                C_min = min(C_in[i_glob, donor_idx, k], C_in[i_glob, receiver_idx, k])
+                fluxes_y[i_glob, j_glob, k] = velocity * max(C_min, min(C_max, C_face_tvd)) * grid.face_area_y[i_glob, j_glob, k]
+            end
+
+            # --- Boundary Faces ---
+            for j_phys in [1, 2, ny, ny+1]
+                j_glob = j_phys + ng
+                vel = v[i_glob, j_glob, k]
+                if isa(grid, CurvilinearGrid)
+                    if vel > 0
+                        upstream_depth = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    elseif vel < 0
+                        upstream_depth = grid.h[i_glob, j_glob] + state.zeta[i_glob, j_glob, k]
+                        if upstream_depth < D_crit; vel = 0.0; end
+                    end
+                end
+                fluxes_y[i_glob, j_glob, k] = vel * (vel >= 0 ? C_in[i_glob, j_glob-1, k] : C_in[i_glob, j_glob, k]) * grid.face_area_y[i_glob, j_glob, k]
+            end
+        end
+    end
+
+    Threads.@threads for k in axes(C_out, 3)
+        for j_phys in 1:ny
+            for i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
+        end
+    end
+end
+
+# ==============================================================================
+# --- SCHEME 3: Implicit Advection (ADI) ---
+# ==============================================================================
+
+"""
+    advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+
+Performs the first step of the ADI sequence (implicit x-sweep).
+Solves `(I - dt*L_x) * C_intermediate = C_initial` for each row.
+"""
+function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+    nx, ny, nz = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+
+    # Pre-allocate vectors for the tridiagonal system
+    a = Vector{Float64}(undef, nx - 1) # sub-diagonal
+    b = Vector{Float64}(undef, nx)     # main diagonal
+    c = Vector{Float64}(undef, nx - 1) # super-diagonal
+    d = Vector{Float64}(undef, nx)     # RHS
+
+    @inbounds for k in 1:nz, j_phys in 1:ny
+        j_glob = j_phys + ng
+        
+        # --- 1. Construct the tridiagonal system for the current row ---
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+            
+            # Enforce zero-flux boundary conditions for the solver
+            u_left = (i_phys == 1) ? 0.0 : u[i_glob, j_glob, k]
+            u_right = (i_phys == nx) ? 0.0 : u[i_glob + 1, j_glob, k]
+
+            dx_i = get_dx_at_face(grid, i_glob, j_glob)
+            dx_ip1 = get_dx_at_face(grid, i_glob + 1, j_glob)
+            cr_left = (dt / dx_i) * u_left
+            cr_right = (dt / dx_ip1) * u_right
+            
+            alpha = max(cr_left, 0)
+            gamma = min(cr_right, 0)
+            beta = max(cr_right, 0) - min(cr_left, 0)
+
+            if i_phys > 1; a[i_phys-1] = -alpha; end
+            b[i_phys] = 1 + beta
+            if i_phys < nx; c[i_phys] = gamma; end
+            d[i_phys] = C_initial[i_glob, j_glob, k]
+        end
+
+        # --- 2. Solve the system using LinearAlgebra ---
+        A = Tridiagonal(a, b, c)
+        solution = A \ d
+        
+        # --- 3. Store the result in the intermediate buffer's physical domain ---
+        view(C_intermediate, (ng+1):(nx+ng), j_glob, k) .= solution
+    end
+end
+
+"""
+    advect_implicit_y!(C_final, C_intermediate, state, grid, dt)
+
+Performs the second step of the ADI sequence (implicit y-sweep).
+Solves `(I - dt*L_y) * C_final = C_intermediate` for each column.
+"""
+function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+    nx, ny, nz = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+
+    # Pre-allocate vectors for the tridiagonal system
+    a = Vector{Float64}(undef, ny - 1) # sub-diagonal
+    b = Vector{Float64}(undef, ny)     # main-diagonal
+    c = Vector{Float64}(undef, ny - 1) # super-diagonal
+    d = Vector{Float64}(undef, ny)     # RHS
+
+    @inbounds for k in 1:nz, i_phys in 1:nx
+        i_glob = i_phys + ng
+
+        # --- 1. Construct the tridiagonal system for the current column ---
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+            
+            # Enforce zero-flux boundary conditions for the solver
+            v_bottom = (j_phys == 1) ? 0.0 : v[i_glob, j_glob, k]
+            v_top = (j_phys == ny) ? 0.0 : v[i_glob, j_glob + 1, k]
+
+            dy_j = get_dy_at_face(grid, i_glob, j_glob)
+            dy_jp1 = get_dy_at_face(grid, i_glob, j_glob + 1)
+            cr_bottom = (dt / dy_j) * v_bottom
+            cr_top = (dt / dy_jp1) * v_top
+
+            alpha = max(cr_bottom, 0)
+            gamma = min(cr_top, 0)
+            beta = max(cr_top, 0) - min(cr_bottom, 0)
+
+            if j_phys > 1; a[j_phys-1] = -alpha; end
+            b[j_phys] = 1 + beta
+            if j_phys < ny; c[j_phys] = gamma; end
+            d[j_phys] = C_intermediate[i_glob, j_glob, k]
+        end
+
+        # --- 2. Solve the system using LinearAlgebra ---
+        A = Tridiagonal(a, b, c)
+        solution = A \ d
+
+        # --- 3. Store the result back into the final tracer array's physical domain ---
+        view(C_final, i_glob, (ng+1):(ny+ng), k) .= solution
+    end
+end
+
+
+# ==============================================================================
+# --- Diffusion and Helper Functions ---
+# ==============================================================================
+
+"""
+    diffuse_x!(C_out, C_in, grid, dt, Kh)
+
+Calculates the change in concentration due to horizontal diffusion in the x-direction.
+
+This function computes diffusive fluxes across the x-faces of the grid cells based on
+the concentration gradient and the horizontal diffusivity coefficient `Kh`. It updates
+the `C_out` array based on the divergence of these fluxes. A no-flux condition is
+enforced at land boundaries by checking the grid mask.
+
+# Arguments
+- `C_out`: The output concentration array (modified in-place).
+- `C_in`: The input concentration array.
+- `grid`: The computational grid.
+- `dt`: The time step.
+- `Kh`: The horizontal diffusion coefficient.
+
+# Returns
+- `nothing`: Modifies `C_out` in-place.
+"""
+function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_x, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    fluxes_x .= 0.0
+    
+    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
+    @inbounds for k in axes(C_in, 3), j_phys in 1:ny, i_phys in 2:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        
+        local flux = 0.0
+        # --- Cell-Face Blocking Logic for Diffusion ---
+        if isa(grid, CurvilinearGrid)
+            depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+            depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
+            if depth1 < D_crit || depth2 < D_crit
+                flux = 0.0
+            else
+                dx = get_dx_centers(grid, i_glob, j_glob)
+                dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
+                flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+            end
+        else # Original logic for CartesianGrid or when not using blocking
+            dx = get_dx_centers(grid, i_glob, j_glob)
+            dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
+            flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+        end
+
+        face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
+        fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
+    end
+
+    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
+        C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+    end
+end
+
+function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_y, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    fluxes_y .= 0.0
+    
+    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
+    @inbounds for k in axes(C_in, 3), j_phys in 2:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        
+        local flux = 0.0
+        # --- Cell-Face Blocking Logic for Diffusion ---
+        if isa(grid, CurvilinearGrid)
+            depth1 = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
+            depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
+            if depth1 < D_crit || depth2 < D_crit
+                flux = 0.0
+            else
+                dy = get_dy_centers(grid, i_glob, j_glob)
+                dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
+                flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+            end
+        else # Original logic for CartesianGrid or when not using blocking
+            dy = get_dy_centers(grid, i_glob, j_glob)
+            dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
+            flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+        end
+
+        face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_v[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob, j_glob-1, k])
+        fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
+    end
+
+    @inbounds for k in axes(C_out, 3), j_phys in 1:ny, i_phys in 1:nx
+        i_glob, j_glob = i_phys + ng, j_phys + ng
+        flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
+        C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+    end
+end
+
+@inline get_grid_dims(grid::CartesianGrid) = Tuple(grid.dims)
+@inline get_grid_dims(grid::CurvilinearGrid) = (grid.nx, grid.ny, grid.nz)
+@inline get_dx_at_face(grid::CartesianGrid, i_glob, j_glob) = (grid.x[2+grid.ng,1+grid.ng,1] - grid.x[1+grid.ng,1+grid.ng,1])
+@inline get_dx_at_face(grid::CurvilinearGrid, i_glob, j_glob) = 1.0 / grid.pm[i_glob, j_glob]
+@inline get_dy_at_face(grid::CartesianGrid, i_glob, j_glob) = (grid.y[1+grid.ng,2+grid.ng,1] - grid.y[1+grid.ng,1+grid.ng,1])
+@inline get_dy_at_face(grid::CurvilinearGrid, i_glob, j_glob) = 1.0 / grid.pn[i_glob, j_glob]
+@inline get_dx_centers(grid::CartesianGrid, i_glob, j_glob) = (grid.x[2+grid.ng,1+grid.ng,1] - grid.x[1+grid.ng,1+grid.ng,1])
+@inline get_dx_centers(grid::CurvilinearGrid, i_glob, j_glob) = 1 / (0.5 * (grid.pm[i_glob-1, j_glob] + grid.pm[i_glob, j_glob]))
+@inline get_dy_centers(grid::CartesianGrid, i_glob, j_glob) = (grid.y[1+grid.ng,2+grid.ng,1] - grid.y[1+grid.ng,1+grid.ng,1])
+@inline get_dy_centers(grid::CurvilinearGrid, i_glob, j_glob) = 1 / (0.5 * (grid.pn[i_glob, j_glob-1] + grid.pn[i_glob, j_glob]))
+
+end # module HorizontalTransportModule
+</file>
+
+<file path="src/TimeSteppingModule.jl">
+# src/TimeSteppingModule.jl
+
+module TimeSteppingModule
+
+export run_simulation, run_and_store_simulation
+
+using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.HydrodynamicsModule
+using ..HydrodynamicTransport.HorizontalTransportModule
+using ..HydrodynamicTransport.VerticalTransportModule
+using ..HydrodynamicTransport.SourceSinkModule
+using ..HydrodynamicTransport.BoundaryConditionsModule
+# --- Added for new physics modules ---
+using ..HydrodynamicTransport.SettlingModule
+using ..HydrodynamicTransport.BedExchangeModule
+using ..HydrodynamicTransport.OysterModule
+# ------------------------------------
+using ProgressMeter
+using NCDatasets
+using JLD2
+
+# --- Test/Placeholder Versions ---
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64; 
+                        boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                        virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                        oyster_tracers::NamedTuple=NamedTuple(),
+                        advection_scheme::Symbol=:TVD,
+                        D_crit::Float64=0.0,
+                        output_dir::Union{String, Nothing}=nothing,
+                        output_interval::Union{Float64, Nothing}=nothing,
+                        restart_from::Union{String, Nothing}=nothing)
+    
+    local state_to_run, effective_start_time
+    if restart_from !== nothing
+        println("--- Restarting simulation from checkpoint: $restart_from ---")
+        loaded_state = JLD2.load_object(restart_from)
+        state_to_run = loaded_state
+        effective_start_time = loaded_state.time
+    else
+        state_to_run = initial_state
+        effective_start_time = start_time
+    end
+
+    state = deepcopy(state_to_run)
+    time_range = effective_start_time:dt:end_time
+    
+    next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
+    if output_dir !== nothing; mkpath(output_dir); end
+    
+    @showprogress "Simulating (Test Mode)..." for (step, time) in enumerate(time_range)
+        if time == effective_start_time; continue; end
+        state.time = time
+        
+        apply_boundary_conditions!(state, grid, boundary_conditions)
+        update_hydrodynamics_placeholder!(state, grid, time)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
+        vertical_transport!(state, grid, dt)
+        
+        deposition = apply_settling!(state, grid, dt, sediment_params)
+        bed_exchange!(state, grid, dt, deposition, sediment_params)
+
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
+
+        if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
+            output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
+            JLD2.save_object(output_filename, state)
+            next_output_time += output_interval
+        end
+    end
+    return state
+end
+
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
+                                  boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                                  virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                                  oyster_tracers::NamedTuple=NamedTuple(),
+                                  advection_scheme::Symbol=:TVD,
+                                  D_crit::Float64=0.0)
+    state = deepcopy(initial_state)
+    time_range = start_time:dt:end_time
+    results = [deepcopy(state)]; timesteps = [start_time]
+    last_output_time = start_time
+    @showprogress "Simulating & Storing (Test Mode)..." for time in time_range
+        if time == start_time; continue; end
+        state.time = time
+
+        apply_boundary_conditions!(state, grid, boundary_conditions)
+        update_hydrodynamics_placeholder!(state, grid, time)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
+        vertical_transport!(state, grid, dt)
+
+        deposition = apply_settling!(state, grid, dt, sediment_params)
+        bed_exchange!(state, grid, dt, deposition, sediment_params)
+
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
+        
+        if time >= last_output_time + output_interval - 1e-9
+            push!(results, deepcopy(state))
+            push!(timesteps, time)
+            last_output_time = time
+        end
+    end
+    return results, timesteps
+end
+
+# --- Real Data Versions ---
+function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64; 
+                        boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                        functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                        sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                        virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                        oyster_tracers::NamedTuple=NamedTuple(),
+                        advection_scheme::Symbol=:TVD,
+                        D_crit::Float64=0.0,
+                        output_dir::Union{String, Nothing}=nothing,
+                        output_interval::Union{Float64, Nothing}=nothing,
+                        restart_from::Union{String, Nothing}=nothing)
+    
+    local state_to_run, effective_start_time
+    if restart_from !== nothing
+        println("--- Restarting simulation from checkpoint: $restart_from ---")
+        loaded_state = JLD2.load_object(restart_from)
+        state_to_run = loaded_state
+        effective_start_time = loaded_state.time
+    else
+        state_to_run = initial_state
+        effective_start_time = start_time
+    end
+
+    state = deepcopy(state_to_run)
+    time_range = effective_start_time:dt:end_time
+    
+    next_output_time = (output_interval !== nothing) ? state.time + output_interval : Inf
+    if output_dir !== nothing; mkpath(output_dir); end
+    
+    @showprogress "Simulating (Real Data)..." for (step, time) in enumerate(time_range)
+        if time == effective_start_time; continue; end
+        state.time = time
+
+        apply_boundary_conditions!(state, grid, boundary_conditions)
+        update_hydrodynamics!(state, grid, ds, hydro_data, time)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
+        vertical_transport!(state, grid, dt)
+        
+        deposition = apply_settling!(state, grid, dt, sediment_params)
+        bed_exchange!(state, grid, dt, deposition, sediment_params)
+
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
+
+        if output_dir !== nothing && (time >= next_output_time || step == length(time_range))
+            output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
+            JLD2.save_object(output_filename, state)
+            next_output_time += output_interval
+        end
+    end
+    return state
+end
+
+function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sources::Vector{PointSource}, ds::NCDataset, hydro_data::HydrodynamicData, start_time::Float64, end_time::Float64, dt::Float64, output_interval::Float64; 
+                                  boundary_conditions::Vector{<:BoundaryCondition}=Vector{BoundaryCondition}(),
+                                  functional_interactions::Vector{FunctionalInteraction}=Vector{FunctionalInteraction}(),
+                                  sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
+                                  virtual_oysters::Vector{VirtualOyster}=VirtualOyster[],
+                                  oyster_tracers::NamedTuple=NamedTuple(),
+                                  advection_scheme::Symbol=:TVD,
+                                  D_crit::Float64=0.0)
+    state = deepcopy(initial_state)
+    time_range = start_time:dt:end_time
+    results = [deepcopy(state)]; timesteps = [start_time]
+    last_output_time = start_time
+    @showprogress "Simulating & Storing (Real Data)..." for time in time_range
+        if time == start_time; continue; end
+        state.time = time
+        
+        apply_boundary_conditions!(state, grid, boundary_conditions)
+        update_hydrodynamics!(state, grid, ds, hydro_data, time)
+        horizontal_transport!(state, grid, dt, advection_scheme, D_crit, boundary_conditions)
+        vertical_transport!(state, grid, dt)
+
+        deposition = apply_settling!(state, grid, dt, sediment_params)
+        bed_exchange!(state, grid, dt, deposition, sediment_params)
+
+        source_sink_terms!(state, grid, sources, functional_interactions, time, dt, D_crit)
+
+        if !isempty(virtual_oysters)
+            update_oysters!(state, grid, virtual_oysters, dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+        end
+
+        if time >= last_output_time + output_interval - 1e-9
+            push!(results, deepcopy(state))
+            push!(timesteps, time)
+            last_output_time = time
+        end
+    end
+    return results, timesteps
+end
+
+end # module TimeSteppingModule
+</file>
+
+</files>

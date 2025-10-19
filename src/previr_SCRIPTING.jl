@@ -105,8 +105,8 @@ functional_interactions = [virus_interaction]
 
 # --- 6. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 12*60.0 # Run for 12 hours
-dt = 6.0             # Use a large timestep, enabled by the implicit schemes
+end_time = 96*60.0*60.0 # Run for 12 hours
+dt = 30.0             # Use a large timestep, enabled by the implicit schemes
 
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 
@@ -122,6 +122,11 @@ println("Output will be saved to: $output_directory")
 
 final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
+    use_adaptive_dt         = true,
+    cfl_max                 = 0.8,
+    dt_max                  = 120.0,
+    dt_min                  = 0.1,
+    dt_growth_factor        = 1.1,
     boundary_conditions     = bcs,
     sediment_params         = sediment_params,
     functional_interactions = functional_interactions,

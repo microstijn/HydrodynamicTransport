@@ -96,7 +96,7 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
         buffers[name] = zeros(size(tracer_arr))
     end
     
-    # --- NEW: Initialize bed_mass dictionary ---
+    # Initialize bed_mass dictionary ---
     bed_mass = Dict{Symbol, Array{Float64, 2}}()
     for name in sediment_tracers
         bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)

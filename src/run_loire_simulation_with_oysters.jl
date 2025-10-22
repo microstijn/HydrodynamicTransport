@@ -135,8 +135,10 @@ for loc in oyster_locations
     i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
     if i !== nothing && j !== nothing
         println("  -> Oyster farm '$(loc.name)' placed at grid indices (i=$i, j=$j)")
-        # Place oysters in the surface layer (k=grid.nz) with an initial concentration of 0.0
-        push!(virtual_oysters, VirtualOyster(i, j, grid.nz, oyster_params, OysterState(0.0)))
+        # Place an oyster in all layers (k=grid.nz) with an initial concentration of 0.0
+        for layer in 1:grid.nz
+            push!(virtual_oysters, VirtualOyster(i, j, layer, oyster_params, OysterState(0.0)))
+        end
     else
         println("  -> Warning: Could not find grid indices for oyster farm '$(loc.name)'.")
     end
@@ -146,12 +148,12 @@ oyster_tracers = (dissolved=:Virus_Dissolved, sorbed=:Virus_Sorbed)
 
 # --- 7. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 96 * 3600.0 # Run for 12 hours
+end_time = 2*96 * 3600.0 # Run for 12 hours
 #end_time = 30*10.0 # Run for 12 hours
 dt = 30.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 output_directory = raw"D:\PreVir\loire_virus_sim_output"
-output_interval_seconds = 30 * 60.0
+output_interval_seconds = 60 * 60.0
 
 # --- 8. Run the Simulation ---
 println("\n--- Starting simulation ---")
@@ -159,7 +161,7 @@ println("Total duration: $(end_time / 3600.0) hours")
 println("Time step (dt): $dt seconds")
 println("Output will be saved to: $output_directory")
 
-restart_file = raw"D:\PreVir\loire_virus_sim_output\state_t_271800.jld2"
+restart_file = nothing
 
 final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
@@ -170,6 +172,8 @@ final_state = run_simulation(
     dt_growth_factor        = 1.1,
     boundary_conditions     = bcs,
     sediment_params         = sediment_params,
+    virtual_oysters         = virtual_oysters,
+    oyster_tracers          = oyster_tracers,
     functional_interactions = functional_interactions,
     advection_scheme        = :TVD,
     D_crit                  = 0.05,
@@ -178,28 +182,8 @@ final_state = run_simulation(
     restart_from            = restart_file
 )
 
-# --- 9. Clean Up and Summarize ---
+# 9. Clean Up and Summarize ---
 close(ds)
 
 println("\n--- Simulation Complete ---")
 println("Final simulation time: $(round(final_state.time / 3600.0, digits=2)) hours.")
-
-# Correct mass calculation
-ng = grid.ng; nx = grid.nx; ny = grid.ny
-phys_view_3d(tracer_arr) = view(tracer_arr, ng+1:nx+ng, ng+1:ny+ng, :)
-phys_view_2d(bed_arr) = view(bed_arr, ng+1:nx+ng, ng+1:ny+ng)
-total_dissolved_mass = sum(phys_view_3d(final_state.tracers[:Virus_Dissolved]) .* phys_view_3d(grid.volume))
-total_sorbed_water_mass = sum(phys_view_3d(final_state.tracers[:Virus_Sorbed]) .* phys_view_3d(grid.volume))
-cell_areas = 1.0 ./ (phys_view_2d(grid.pm) .* phys_view_2d(grid.pn))
-total_bed_mass = sum(phys_view_2d(final_state.bed_mass[:Virus_Sorbed]) .* cell_areas)
-
-println("\n--- Final Mass Balance ---")
-println("Total dissolved virus mass: ", total_dissolved_mass)
-println("Total sorbed virus mass in water: ", total_sorbed_water_mass)
-println("Total sorbed virus mass in bed: ", total_bed_mass)
-println("Total virus mass in system: ", total_dissolved_mass + total_sorbed_water_mass + total_bed_mass)
-
-println("\n--- Final Oyster Concentrations ---")
-for (idx, oyster) in enumerate(virtual_oysters)
-    println("$(oyster_locations[idx].name): $(oyster.state.c_oyster) vg/g")
-end

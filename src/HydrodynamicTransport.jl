@@ -6,6 +6,7 @@ module HydrodynamicTransport
 include("ModelStructs.jl")
 include("GridModule.jl")
 include("StateModule.jl")
+include("UtilsModule.jl") 
 include("VectorOperationsModule.jl")
 include("BoundaryConditionsModule.jl")
 include("HorizontalTransportModule.jl")
@@ -21,7 +22,7 @@ include("BedExchangeModule.jl")
 include("OysterModule.jl")
 
 include("TimeSteppingModule.jl")
-include("UtilsModule.jl") 
+
 
 
 # Bring the contents of the modules into the main module's scope ---

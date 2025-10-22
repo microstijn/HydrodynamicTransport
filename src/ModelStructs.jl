@@ -4,7 +4,7 @@ module ModelStructs
 
 export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
-       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
+       SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster
 
 using StaticArrays
 using Base: @kwdef
@@ -37,7 +37,8 @@ end
 
 mutable struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
-    _buffers::Dict{Symbol, Array{Float64, 3}} # Buffer for temporary tracer calculations
+    _buffer1::Dict{Symbol, Array{Float64, 3}}  # Renamed from _buffers
+    _buffer2::Dict{Symbol, Array{Float64, 3}}  # NEW: Second buffer for 3-sweep ADI
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
     zeta::Array{Float64, 3}
     flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
@@ -46,7 +47,7 @@ mutable struct State
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
     time::Float64
-    bed_mass::Dict{Symbol, Array{Float64, 2}} # NEW: Mass per unit area (kg/m^2)
+    bed_mass::Dict{Symbol, Array{Float64, 2}} # Mass per unit area (kg/m^2)
 end
 
 @kwdef struct PointSource
@@ -61,24 +62,6 @@ end
     interaction_function::Function
 end
 
-"""
-    DecayParams
-
-Parameters for a first-order tracer decay model where the decay rate can depend on
-temperature and sunlight. This struct is designed to be used with the `FunctionalInteraction`
-framework.
-
-# Example
-```julia
-# Configure decay for a tracer named :Virus
-# It has a base 5-day half-life at 20°C and is sensitive to temperature.
-decay_for_virus = DecayParams(
-    tracer_name = :Virus,
-    base_rate = 1.0 / (5 * 24 * 3600.0), # Convert 5-day half-life to 1/s
-    temp_theta = 1.07,
-    light_coeff = 0.0 # No light dependence in this example
-)
-"""
 @kwdef struct DecayParams
     tracer_name::Symbol
     base_rate::Float64 = 0.0
@@ -87,7 +70,6 @@ decay_for_virus = DecayParams(
     light_coeff::Float64 = 0.0 
 end
 
-# NEW: Parameters for sediment tracers
 @kwdef struct SedimentParams
     ws::Float64             # Settling velocity (m/s, positive downwards)
     erosion_rate::Float64   # A simple constant erosion rate (kg/m^2/s)

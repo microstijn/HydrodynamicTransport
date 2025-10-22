@@ -152,7 +152,7 @@ end_time = 2*96 * 3600.0 # Run for 12 hours
 #end_time = 30*10.0 # Run for 12 hours
 dt = 30.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
-output_directory = raw"D:\PreVir\loire_virus_sim_output"
+output_directory = raw"D:\PreVir\loire_virus_sim_outputADi"
 output_interval_seconds = 60 * 60.0
 
 # --- 8. Run the Simulation ---
@@ -166,8 +166,8 @@ restart_file = nothing
 final_state = run_simulation(
     grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
     use_adaptive_dt         = true,
-    cfl_max                 = 0.8,
-    dt_max                  = 120.0,
+    cfl_max                 = 6.0,
+    dt_max                  = 1000.0,
     dt_min                  = 0.01,
     dt_growth_factor        = 1.1,
     boundary_conditions     = bcs,

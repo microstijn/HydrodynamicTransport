@@ -251,7 +251,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         trial_dt = min(trial_dt, end_time - time, next_output_time - time)
 
         if use_adaptive_dt && trial_dt < dt_min
-            println("\nWarning: Timestep below minimum threshold. Stopping simulation.")
+            @warn "\nWarning: Timestep below minimum threshold. Stopping simulation."
             break
         end
         if trial_dt < 1e-9; break; end

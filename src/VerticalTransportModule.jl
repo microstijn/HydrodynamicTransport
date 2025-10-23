@@ -120,7 +120,7 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
                 C_col_in = C_buffer[i_glob, j_glob, :]
                 C_col_out = view(C_final, i_glob, j_glob, :)
                 
-                solve_implicit_diffusion_column!(C_out_col, C_col_in, grid, i_glob, j_glob, dt, Kz)
+                solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
             end
         end
     end

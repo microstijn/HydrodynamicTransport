@@ -148,9 +148,10 @@ oyster_tracers = (dissolved=:Virus_Dissolved, sorbed=:Virus_Sorbed)
 
 # --- 7. Simulation and Output Parameters ---
 start_time = 0.0
-end_time = 2*96 * 3600.0 # Run for 12 hours
+end_time = 6*96 * 3600.0 # Run for 12 hours
+
 #end_time = 30*10.0 # Run for 12 hours
-dt = 30.0
+dt = 100.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 output_directory = raw"D:\PreVir\loire_virus_sim_outputADi"
 output_interval_seconds = 60 * 60.0
@@ -164,10 +165,12 @@ println("Output will be saved to: $output_directory")
 restart_file = nothing
 
 final_state = run_simulation(
-    grid, state, sources, ds, hydro_data, start_time, end_time, dt; 
+    grid, state, sources, start_time, end_time, dt; 
+    ds,
+    hydro_data, 
     use_adaptive_dt         = true,
-    cfl_max                 = 6.0,
-    dt_max                  = 1000.0,
+    cfl_max                 = 10.0,
+    dt_max                  = 1500.0,
     dt_min                  = 0.01,
     dt_growth_factor        = 1.1,
     boundary_conditions     = bcs,
@@ -175,12 +178,16 @@ final_state = run_simulation(
     virtual_oysters         = virtual_oysters,
     oyster_tracers          = oyster_tracers,
     functional_interactions = functional_interactions,
-    advection_scheme        = :TVD,
+    advection_scheme        = :ImplicitADI_3D,
     D_crit                  = 0.05,
     output_dir              = output_directory,
     output_interval         = output_interval_seconds,
     restart_from            = restart_file
 )
+
+sum(final_state.tracers[:Virus_Dissolved][:, :, 1])
+sum(final_state.tracers[:Virus_Sorbed][:, :, 1])
+sum(final_state.bed_mass[:Virus_Sorbed])
 
 # 9. Clean Up and Summarize ---
 close(ds)

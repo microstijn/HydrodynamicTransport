@@ -2,7 +2,7 @@
 
 module HorizontalTransportModule
 
-export horizontal_transport!
+export horizontal_transport!, advect_diffuse_implicit_x!, advect_diffuse_implicit_y!
 
 using ..HydrodynamicTransport.ModelStructs
 using ..HydrodynamicTransport.BoundaryConditionsModule: apply_intermediate_boundary_conditions!
@@ -37,7 +37,7 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
     Kh = 1.0 
     for tracer_name in keys(state.tracers)
         C_initial = state.tracers[tracer_name]
-        C_intermediate = state._buffers[tracer_name] # Re-using buffer
+        C_intermediate = state._buffer1[tracer_name] # Re-using buffer
         
         # --- Advection Step ---
         if scheme == :TVD
@@ -667,6 +667,119 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
         C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
     end
 end
+
+# ==============================================================================
+#  3D Implicit Advection-Diffusion (Crank-Nicolson ADI) ---
+# ==============================================================================
+
+function advect_diffuse_implicit_x!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+
+    # Pre-allocate vectors for the tridiagonal system for each thread to ensure thread-safety
+    a_threads = [Vector{Float64}(undef, nx - 1) for _ in 1:Threads.nthreads()]
+    b_threads = [Vector{Float64}(undef, nx)     for _ in 1:Threads.nthreads()]
+    c_threads = [Vector{Float64}(undef, nx - 1) for _ in 1:Threads.nthreads()]
+    d_threads = [Vector{Float64}(undef, nx)     for _ in 1:Threads.nthreads()]
+
+    Threads.@threads for k in axes(C_in, 3)
+        tid = Threads.threadid()
+        a, b, c, d = a_threads[tid], b_threads[tid], c_threads[tid], d_threads[tid]
+
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+
+            # --- 1. Build the tridiagonal system for the current row ---
+            for i_phys in 1:nx
+                i_glob = i_phys + ng
+
+                dx = get_dx_centers(grid, i_glob, j_glob)
+                u_left  = u[i_glob,     j_glob, k]
+                u_right = u[i_glob + 1, j_glob, k]
+
+                Cr_left  = 0.5 * u_left * dt / dx
+                Cr_right = 0.5 * u_right * dt / dx
+                D_num    = 0.5 * Kh * dt / (dx^2)
+
+                # LHS Coefficients (implicit part)
+                sub_diag  = -Cr_left - D_num
+                sup_diag  =  Cr_right - D_num
+                main_diag =  1.0 + Cr_right - Cr_left + 2.0*D_num
+
+                if i_phys > 1;  a[i_phys - 1] = sub_diag; end
+                if i_phys < nx; c[i_phys]     = sup_diag; end
+                b[i_phys] = main_diag
+
+                # RHS vector (explicit part)
+                d[i_phys] = C_in[i_glob, j_glob, k] * (1.0 - (Cr_right - Cr_left) - 2.0*D_num) +
+                            C_in[i_glob - 1, j_glob, k] * (Cr_left + D_num) +
+                            C_in[i_glob + 1, j_glob, k] * (-Cr_right + D_num)
+            end
+
+            # --- 2. Enforce no-flux (zero-gradient) boundary conditions ---
+            b[1]  += a[1];  a[1] = 0.0
+            b[nx] += c[nx-1]; c[nx-1] = 0.0
+
+            # --- 3. Solve the system and store the result ---
+            A = Tridiagonal(a, b, c)
+            solution = A \ d
+            view(C_out, (ng+1):(nx+ng), j_glob, k) .= solution
+        end
+    end
+end
+
+function advect_diffuse_implicit_y!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+
+    a_threads = [Vector{Float64}(undef, ny - 1) for _ in 1:Threads.nthreads()]
+    b_threads = [Vector{Float64}(undef, ny)     for _ in 1:Threads.nthreads()]
+    c_threads = [Vector{Float64}(undef, ny - 1) for _ in 1:Threads.nthreads()]
+    d_threads = [Vector{Float64}(undef, ny)     for _ in 1:Threads.nthreads()]
+
+    Threads.@threads for k in axes(C_in, 3)
+        tid = Threads.threadid()
+        a, b, c, d = a_threads[tid], b_threads[tid], c_threads[tid], d_threads[tid]
+
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+            
+            for j_phys in 1:ny
+                j_glob = j_phys + ng
+
+                dy = get_dy_centers(grid, i_glob, j_glob)
+                v_bottom = v[i_glob, j_glob,     k]
+                v_top    = v[i_glob, j_glob + 1, k]
+
+                Cr_bottom = 0.5 * v_bottom * dt / dy
+                Cr_top    = 0.5 * v_top    * dt / dy
+                D_num     = 0.5 * Kh * dt / (dy^2)
+
+                sub_diag  = -Cr_bottom - D_num
+                sup_diag  =  Cr_top    - D_num
+                main_diag =  1.0 + Cr_top - Cr_bottom + 2.0*D_num
+
+                if j_phys > 1;  a[j_phys - 1] = sub_diag; end
+                if j_phys < ny; c[j_phys]     = sup_diag; end
+                b[j_phys] = main_diag
+
+                d[j_phys] = C_in[i_glob, j_glob, k] * (1.0 - (Cr_top - Cr_bottom) - 2.0*D_num) +
+                            C_in[i_glob, j_glob - 1, k] * (Cr_bottom + D_num) +
+                            C_in[i_glob, j_glob + 1, k] * (-Cr_top + D_num)
+            end
+
+            b[1]  += a[1];  a[1] = 0.0
+            b[ny] += c[ny-1]; c[ny-1] = 0.0
+
+            A = Tridiagonal(a, b, c)
+            solution = A \ d
+            view(C_out, i_glob, (ng+1):(ny+ng), k) .= solution
+        end
+    end
+end
+
 
 @inline get_grid_dims(grid::CartesianGrid) = Tuple(grid.dims)
 @inline get_grid_dims(grid::CurvilinearGrid) = (grid.nx, grid.ny, grid.nz)

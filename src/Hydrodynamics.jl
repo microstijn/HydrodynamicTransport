@@ -38,8 +38,39 @@ function update_hydrodynamics_placeholder!(state::State, grid::CartesianGrid, ti
 end
 
 function update_hydrodynamics_placeholder!(state::State, grid::CurvilinearGrid, time::Float64)
-    @warn "Placeholder hydrodynamics for CurvilinearGrid is not implemented. Setting velocities to zero."
-    state.u .= 0.0; state.v .= 0.0; state.w .= 0.0; state.zeta .= 0.0
+    ng = grid.ng
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    
+    dx_approx = 1.0 / grid.pm[ng+nx÷2, ng+ny÷2]
+    dy_approx = 1.0 / grid.pn[ng+nx÷2, ng+ny÷2]
+
+    Lx = nx * dx_approx; Ly = ny * dy_approx
+    center_x = Lx / 2; center_y = Ly / 2
+    omega = 0.001
+
+    # Set all velocities to zero initially
+    state.u .= 0.0
+    state.v .= 0.0
+
+    # Calculate velocities for INTERIOR faces only
+    for k in 1:nz
+        # U-velocities (X-faces)
+        for j_phys in 1:ny, i_phys in 2:nx
+            i_glob, j_glob = i_phys + ng, j_phys + ng
+            y_center = (j_phys - 0.5) * dy_approx
+            # FIX: Corrected sign for counter-clockwise rotation
+            state.u[i_glob, j_glob, k] = omega * (y_center - center_y)
+        end
+        # V-velocities (Y-faces)
+        for j_phys in 2:ny, i_phys in 1:nx
+            i_glob, j_glob = i_phys + ng, j_phys + ng
+            x_center = (i_phys - 0.5) * dx_approx
+            state.v[i_glob, j_glob, k] = -omega * (x_center - center_x)
+        end
+    end
+    
+    state.w .= 0.0
+    state.zeta .= 0.0
 end
 
 
@@ -53,13 +84,12 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
     elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
     else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
     
-    # --- UPDATED: Use dimension names from MARS3D file ---
     fields_to_load = [
         (state.u, :u, "ni_u", "nj_u", "level"),
         (state.v, :v, "ni_v", "nj_v", "level"),
         (state.temperature, :temp, "ni", "nj", "level"),
         (state.salinity, :salt, "ni", "nj", "level"),
-        (state.zeta, :zeta, "ni", "nj", nothing), # Special case for 2D field
+        (state.zeta, :zeta, "ni", "nj", nothing),
     ]
 
     for (state_field, standard_name, x_dim, y_dim, z_dim) in fields_to_load
@@ -68,7 +98,7 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
             if haskey(ds, nc_var_name)
                 nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]
                 
-                if z_dim !== nothing # Handle 3D fields (u, v, temp, salt)
+                if z_dim !== nothing
                     nz_phys = ds.dim[z_dim]
                     interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
                     data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
@@ -78,7 +108,7 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
                     else
                         interior_view .= data_slice1
                     end
-                else # Handle 2D fields (zeta)
+                else
                     interior_view_3d = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, :)
                     data_slice1_2d = coalesce.(ds[nc_var_name][:, :, idx1], 0.0)
                     
@@ -90,7 +120,6 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
                         interpolated_data_2d = data_slice1_2d
                     end
                     
-                    # Broadcast the 2D data across the 3D state array's vertical dimension
                     for k in 1:size(interior_view_3d, 3)
                         view(interior_view_3d, :, :, k) .= interpolated_data_2d
                     end
@@ -104,3 +133,4 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
 end
 
 end # module HydrodynamicsModule
+

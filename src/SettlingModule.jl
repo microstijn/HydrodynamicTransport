@@ -33,11 +33,12 @@ returned as the deposition flux to the bed.
   at the seabed for each (i,j) location.
 """
 function apply_settling!(state::State, grid::AbstractGrid, dt::Float64, sediment_tracers::Dict{Symbol, SedimentParams})
-    if isempty(sediment_tracers); return Dict(); end
+    # FIX: Ensure the correct type is returned even if the dictionary is empty.
+    if isempty(sediment_tracers); return Dict{Symbol, Array{Float64, 2}}(); end
 
     ng = grid.ng
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
-    if nz <= 1; return Dict(); end
+    if nz <= 1; return Dict{Symbol, Array{Float64, 2}}(); end
 
     deposition_fluxes = Dict{Symbol, Array{Float64, 2}}()
 

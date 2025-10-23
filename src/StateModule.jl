@@ -14,14 +14,15 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
 
     tracers = Dict{Symbol, Array{Float64, 3}}()
-    buffers = Dict{Symbol, Array{Float64, 3}}()
+    buffer1 = Dict{Symbol, Array{Float64, 3}}()
+    buffer2 = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
         tracer_arr = zeros(Float64, nx_tot, ny_tot, nz)
         tracers[name] = tracer_arr
-        buffers[name] = zeros(size(tracer_arr))
+        buffer1[name] = zeros(size(tracer_arr))
+        buffer2[name] = zeros(size(tracer_arr))
     end
     
-    # --- NEW: Initialize bed_mass dictionary ---
     bed_mass = Dict{Symbol, Array{Float64, 2}}()
     for name in sediment_tracers
         bed_mass[name] = zeros(Float64, nx_tot, ny_tot)
@@ -41,8 +42,7 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
     zeta = zeros(Float64, nx_tot, ny_tot, nz)
 
-    # --- UPDATED: Pass bed_mass to the constructor ---
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+    return State(tracers, buffer1, buffer2, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
 end
 
 function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
@@ -52,14 +52,15 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
 
     tracers = Dict{Symbol, Array{Float64, 3}}()
-    buffers = Dict{Symbol, Array{Float64, 3}}()
+    buffer1 = Dict{Symbol, Array{Float64, 3}}()
+    buffer2 = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
         tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
         tracers[name] = tracer_arr
-        buffers[name] = zeros(size(tracer_arr))
+        buffer1[name] = zeros(size(tracer_arr))
+        buffer2[name] = zeros(size(tracer_arr))
     end
     
-    # --- NEW: Initialize bed_mass dictionary ---
     bed_mass = Dict{Symbol, Array{Float64, 2}}()
     for name in sediment_tracers
         bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
@@ -79,8 +80,7 @@ function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol}
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    # --- UPDATED: Pass bed_mass to the constructor ---
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+    return State(tracers, buffer1, buffer2, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
 end
 
 function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])
@@ -89,14 +89,15 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
 
     nx_rho_tot, ny_rho_tot = nx + 2*ng, ny + 2*ng
     tracers = Dict{Symbol, Array{Float64, 3}}()
-    buffers = Dict{Symbol, Array{Float64, 3}}()
+    buffer1 = Dict{Symbol, Array{Float64, 3}}()
+    buffer2 = Dict{Symbol, Array{Float64, 3}}()
     for name in tracer_names
         tracer_arr = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
         tracers[name] = tracer_arr
-        buffers[name] = zeros(size(tracer_arr))
+        buffer1[name] = zeros(size(tracer_arr))
+        buffer2[name] = zeros(size(tracer_arr))
     end
     
-    # Initialize bed_mass dictionary ---
     bed_mass = Dict{Symbol, Array{Float64, 2}}()
     for name in sediment_tracers
         bed_mass[name] = zeros(Float64, nx_rho_tot, ny_rho_tot)
@@ -116,8 +117,7 @@ function initialize_state(grid::CurvilinearGrid, ds::NCDataset, tracer_names::NT
     uvb = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
     zeta = zeros(Float64, nx_rho_tot, ny_rho_tot, nz)
 
-    # --- UPDATED: Pass bed_mass to the constructor ---
-    return State(tracers, buffers, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
+    return State(tracers, buffer1, buffer2, u, v, w, zeta, flux_x, flux_y, flux_z, temperature, salinity, tss, uvb, 0.0, bed_mass)
 end
 
 end # module StateModule

@@ -87,7 +87,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         trial_dt = min(trial_dt, end_time - time, next_output_time - time)
 
         if use_adaptive_dt && trial_dt < dt_min
-            println("\nWarning: Timestep below minimum threshold. Stopping simulation.")
+            @warn "\nWarning: Timestep below minimum threshold. Stopping simulation."
             break
         end
         if trial_dt < 1e-9; break; end
@@ -105,6 +105,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             else
                 update_hydrodynamics_placeholder!(state_backup, grid, time + trial_dt)
             end
+
+            apply_boundary_conditions!(state_backup, grid, boundary_conditions)
 
             # Transport Step 
             if advection_scheme == :ImplicitADI_3D
@@ -224,8 +226,10 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
             state_backup = deepcopy(state)
             oysters_backup = deepcopy(virtual_oysters)
 
-            apply_boundary_conditions!(state_backup, grid, boundary_conditions)
-            
+            if time == start_time
+                apply_boundary_conditions!(state_backup, grid, boundary_conditions)
+            end
+
             if ds !== nothing && hydro_data !== nothing
                 update_hydrodynamics!(state_backup, grid, ds, hydro_data, time + trial_dt)
             else
@@ -233,6 +237,8 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                 # probably a vortex
                 update_hydrodynamics_placeholder!(state_backup, grid, time + trial_dt)
             end
+
+            apply_boundary_conditions!(state_backup, grid, boundary_conditions)
 
             if advection_scheme == :ImplicitADI_3D
                 # if we do advection/diffusion in one go we no longer need to call for them seperately
@@ -249,6 +255,11 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
             else
                 horizontal_transport!(state_backup, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
                 vertical_transport!(state_backup, grid, trial_dt)
+            end
+
+            # Clipping logic. Small negative values can snowball. 
+            for C_array in values(state_backup.tracers)
+                clamp!(C_array, 0.0, Inf)
             end
             
             deposition = apply_settling!(state_backup, grid, trial_dt, sediment_params)

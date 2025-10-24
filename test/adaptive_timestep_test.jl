@@ -93,3 +93,111 @@ using HydrodynamicTransport.UtilsModule: calculate_max_cfl_term
         println("Initial dt: $dt_init, Min dt reached: $(minimum(dt_history)), Final dt: $(dt_history[end])")
     end
 end
+
+
+
+# ==============================================================================
+# --- TESTSET 9: CFL Calculation ---
+# ==============================================================================
+@testset "9. CFL Calculation" begin
+    @info "Running Testset 9: CFL Calculation..."
+
+    @testset "CartesianGrid 3D CFL" begin
+        # --- 1. Setup ---
+        nx, ny, nz = 10, 10, 10
+        Lx, Ly, Lz = 100.0, 100.0, 100.0
+        grid = initialize_cartesian_grid(nx, ny, nz, Lx, Ly, Lz)
+        state = initialize_state(grid, (:C,))
+        ng = grid.ng
+
+        dx = Lx / nx # 10.0
+        dz = Lz / nz # 10.0
+        
+        # --- 2. Velocities ---
+        i, j = 5, 5
+        i_glob, j_glob = i + ng, j + ng
+
+        # Set velocities to 0
+        state.u .= 0.0
+        state.v .= 0.0
+        state.w .= 0.0
+
+        # A) Fast horizontal velocity at the BOTTOM (k=1)
+        u_fast_val = 40.0
+        state.u[i_glob, j_glob, 1] = u_fast_val
+        # u_center = 0.5 * (40.0 + 0.0) = 20.0
+        # cfl_horiz = 20.0 / dx = 2.0
+
+        # B) Fast vertical velocity at the face k=2
+        w_fast_val = 30.0
+        state.w[i_glob, j_glob, 2] = w_fast_val
+        # w_face_vel = max(abs(w[k=1]), abs(w[k=2])) = max(0.0, 30.0) = 30.0
+        # cfl_vert = 30.0 / dz = 3.0
+        
+        # --- 3. Calculate Expected Result ---
+        # The new function at k=1 should find:
+        # total_cfl = cfl_horiz (2.0) + cfl_vert (3.0) = 5.0
+        # All other cells will be smaller.
+        expected_max_cfl = 5.0
+        
+        # --- 4. Run and Test ---
+        result = calculate_max_cfl_term(state, grid)
+        @test result == expected_max_cfl
+    end
+
+    @testset "CurvilinearGrid 3D CFL" begin
+        # --- 1. Setup ---
+        nx, ny, nz = 10, 10, 10
+        Lx, Ly, Lz = 100.0, 100.0, 100.0
+        dx = Lx / nx; dy = Ly / ny
+        ng = 2
+        
+        nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
+        pm_full = fill(1.0 / dx, (nx_tot, ny_tot)) # pm = 0.1
+        pn_full = fill(1.0 / dy, (nx_tot, ny_tot)) # pn = 0.1
+        z_w_vec = collect(range(-Lz, 0.0, length=nz+1))
+        dz = abs(z_w_vec[2] - z_w_vec[1]) # dz = 10.0
+
+        face_area_x = fill(dy * dz, (nx_tot + 1, ny_tot, nz))
+        face_area_y = fill(dx * dz, (nx_tot, ny_tot + 1, nz))
+        volume = fill(dx * dy * dz, (nx_tot, ny_tot, nz))
+
+        curv_grid = CurvilinearGrid(
+            ng, nx, ny, nz,
+            zeros(nx_tot, ny_tot), zeros(nx_tot, ny_tot), zeros(nx_tot+1, ny_tot), zeros(nx_tot+1, ny_tot), zeros(nx_tot, ny_tot+1), zeros(nx_tot, ny_tot+1),
+            z_w_vec, pm_full, pn_full, zeros(nx_tot, ny_tot), fill(Lz, (nx_tot, ny_tot)),
+            ones(Bool, nx_tot, ny_tot), ones(Bool, nx_tot+1, ny_tot), ones(Bool, nx_tot, ny_tot+1),
+            face_area_x, face_area_y, volume
+        )
+        state = initialize_state(curv_grid, (:C,))
+        
+        # --- 2. Velocities (same as Cartesian) ---
+        i, j = 5, 5
+        i_glob, j_glob = i + ng, j + ng
+
+        # Set velocities to 0
+        state.u .= 0.0
+        state.v .= 0.0
+        state.w .= 0.0
+
+        # A) Fast horizontal velocity at the BOTTOM (k=1)
+        u_fast_val = 40.0
+        state.u[i_glob, j_glob, 1] = u_fast_val
+        # u_center = 0.5 * (40.0 + 0.0) = 20.0
+        # cfl_horiz = 20.0 * pm = 2.0
+
+        # B) Fast vertical velocity at the face k=2
+        w_fast_val = 30.0
+        state.w[i_glob, j_glob, 2] = w_fast_val
+        # w_face_vel = max(abs(w[k=1]), abs(w[k=2])) = max(0.0, 30.0) = 30.0
+        # cfl_vert = 30.0 / dz = 3.0
+        
+        # --- 3. Calculate Expected Result ---
+        expected_max_cfl = 5.0
+        
+        # --- 4. Run and Test ---
+        result = calculate_max_cfl_term(state, curv_grid)
+        @test result == expected_max_cfl
+    end
+    
+end

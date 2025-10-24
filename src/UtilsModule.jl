@@ -39,26 +39,27 @@ function calculate_max_cfl_term(state::State, grid::CurvilinearGrid)
             i_glob, j_glob = i + ng, j + ng
             
             if grid.mask_rho[i_glob, j_glob]
-                # Horizontal components (dx ≈ 1/pm, dy ≈ 1/pn)
-                # Use surface velocities as representative for the horizontal term
-                u_center = 0.5 * (u[i_glob, j_glob, nz] + u[i_glob+1, j_glob, nz])
-                v_center = 0.5 * (v[i_glob, j_glob, nz] + v[i_glob, j_glob+1, nz])
-                cfl_term_horiz = abs(u_center) * pm[i_glob, j_glob] + abs(v_center) * pn[i_glob, j_glob]
+                max_cfl_in_column = 0.0
+                for k in 1:nz  # <-- THIS IS THE CRITICAL FIX
+                    # 1. Horizontal CFL for this cell (i,j,k)
+                    u_center = 0.5 * (u[i_glob, j_glob, k] + u[i_glob+1, j_glob, k])
+                    v_center = 0.5 * (v[i_glob, j_glob, k] + v[i_glob, j_glob+1, k])
+                    cfl_term_horiz = abs(u_center) * pm[i_glob, j_glob] + abs(v_center) * pn[i_glob, j_glob]
 
-                # Find the maximum vertical component in this column
-                max_cfl_term_vert = 0.0
-                for k in 1:nz
+                    # 2. Vertical CFL for this cell (i,j,k)
                     dz = abs(grid.z_w[k+1] - grid.z_w[k])
-                    w_center = 0.5 * (w[i_glob, j_glob, k] + w[i_glob, j_glob, k+1])
-                    cfl_term_vert = abs(w_center) / dz
-                    if cfl_term_vert > max_cfl_term_vert
-                        max_cfl_term_vert = cfl_term_vert
+                    # Use max face velocity (more conservative)
+                    w_face_vel = max(abs(w[i_glob, j_glob, k]), abs(w[i_glob, j_glob, k+1]))
+                    cfl_term_vert = w_face_vel / dz
+
+                    # 3. Total 3D CFL for this cell
+                    total_cfl_term = cfl_term_horiz + cfl_term_vert
+                    
+                    if total_cfl_term > max_cfl_in_column
+                        max_cfl_in_column = total_cfl_term
                     end
                 end
-                
-                # Total CFL term for this (i,j) location is the sum of horizontal and max vertical
-                total_cfl_term = cfl_term_horiz + max_cfl_term_vert
-                Threads.atomic_max!(max_cfl_term, total_cfl_term)
+                Threads.atomic_max!(max_cfl_term, max_cfl_in_column)
             end
         end
     end
@@ -69,8 +70,10 @@ end
 function calculate_max_cfl_term(state::State, grid::CartesianGrid)
     u, v, w = state.u, state.v, state.w
     ng, (nx, ny, nz) = grid.ng, grid.dims
-    dx = grid.volume[ng+1,ng+1,1] / grid.face_area_x[ng+2,ng+1,1]
-    dy = grid.volume[ng+1,ng+1,1] / grid.face_area_y[ng+1,ng+2,1]
+    
+    # Calculate dx, dy, dz directly and correctly
+    dx = (grid.x[ng+2, ng+1, 1] - grid.x[ng+1, ng+1, 1])
+    dy = (grid.y[ng+1, ng+2, 1] - grid.y[ng+1, ng+1, 1])
     
     max_cfl_term = Threads.Atomic{Float64}(0.0)
 
@@ -78,23 +81,31 @@ function calculate_max_cfl_term(state::State, grid::CartesianGrid)
         for i in 1:nx
             i_glob, j_glob = i + ng, j + ng
 
-            if grid.mask[i_glob, j_glob, 1] # Check mask on one layer
-                u_center = 0.5 * (u[i_glob, j_glob, end] + u[i_glob+1, j_glob, end])
-                v_center = 0.5 * (v[i_glob, j_glob, end] + v[i_glob, j_glob+1, end])
-                cfl_term_horiz = abs(u_center) / dx + abs(v_center) / dy
+            if grid.mask[i_glob, j_glob, 1] 
+                max_cfl_in_column = 0.0
+                for k in 1:nz 
+                    # 1. Horizontal CFL
+                    u_center = 0.5 * (u[i_glob, j_glob, k] + u[i_glob+1, j_glob, k])
+                    v_center = 0.5 * (v[i_glob, j_glob, k] + v[i_glob, j_glob+1, k])
+                    cfl_term_horiz = abs(u_center) / dx + abs(v_center) / dy
 
-                max_cfl_term_vert = 0.0
-                for k in 1:nz
-                    dz = grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k]
-                    w_center = 0.5 * (w[i_glob, j_glob, k] + w[i_glob, j_glob, k+1])
-                    cfl_term_vert = abs(w_center) / dz
-                    if cfl_term_vert > max_cfl_term_vert
-                        max_cfl_term_vert = cfl_term_vert
+                    # 2. Vertical CFL
+                    # --- THIS IS THE FIX ---
+                    # Calculate dz robustly using volume and face area (using top face k+1)
+                    dz = grid.volume[i_glob,j_glob,k] / grid.face_area_z[i_glob,j_glob,k+1]
+                    # --- END FIX ---
+                    
+                    w_face_vel = max(abs(w[i_glob, j_glob, k]), abs(w[i_glob, j_glob, k+1]))
+                    cfl_term_vert = w_face_vel / dz
+
+                    # 3. Total 3D CFL
+                    total_cfl_term = cfl_term_horiz + cfl_term_vert
+
+                    if total_cfl_term > max_cfl_in_column
+                        max_cfl_in_column = total_cfl_term
                     end
                 end
-
-                total_cfl_term = cfl_term_horiz + max_cfl_term_vert
-                Threads.atomic_max!(max_cfl_term, total_cfl_term)
+                Threads.atomic_max!(max_cfl_term, max_cfl_in_column)
             end
         end
     end

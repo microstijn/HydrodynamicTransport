@@ -7,6 +7,7 @@ include("ModelStructs.jl")
 include("GridModule.jl")
 include("StateModule.jl")
 include("UtilsModule.jl") 
+include("FluxLimitersModule.jl")
 include("VectorOperationsModule.jl")
 include("BoundaryConditionsModule.jl")
 include("HorizontalTransportModule.jl")
@@ -30,6 +31,7 @@ using .ModelStructs
 using .GridModule
 using .StateModule
 using .VectorOperationsModule
+using .FluxLimitersModule
 using .BoundaryConditionsModule
 using .HorizontalTransportModule
 using .VerticalTransportModule

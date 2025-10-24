@@ -7,7 +7,7 @@ export calculate_limited_flux, van_leer, minmod, superbee, mc
 
 Calculates phi based on van Leers method.
 """
-function van_leer(r::Float64)
+@inline function van_leer(r::Float64)
     return (r + abs(r)) / (1.0 + abs(r))
 end
 
@@ -16,7 +16,7 @@ end
 
 Calculates phi based on the minmod limiter.
 """
-function minmod(r::Float64)
+@inline function minmod(r::Float64)
     return max(0.0, min(1.0, r))
 end
 
@@ -25,7 +25,7 @@ end
 
 Calculates phi based on the superbee limiter.
 """
-function superbee(r::Float64)
+@inline function superbee(r::Float64)
     return max(0.0, min(2.0 * r, 1.0), min(r, 2.0))
 end
 
@@ -34,7 +34,7 @@ end
 
 Calculates phi based on the Monotonized Central (MC) limiter.
 """
-function mc(r::Float64)
+@inline function mc(r::Float64)
     return max(0.0, min(2.0 * r, 0.5 * (1.0 + r), 2.0))
 end
 

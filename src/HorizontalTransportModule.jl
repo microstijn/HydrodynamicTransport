@@ -2,9 +2,12 @@
 
 module HorizontalTransportModule
 
-export horizontal_transport!, advect_diffuse_implicit_x!, advect_diffuse_implicit_y!
+export horizontal_transport!
+export advect_diffuse_implicit_x!, advect_diffuse_implicit_y!
+export advect_diffuse_tvd_implicit_x!, advect_diffuse_tvd_implicit_y!
 
 using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.FluxLimitersModule
 using ..HydrodynamicTransport.BoundaryConditionsModule: apply_intermediate_boundary_conditions!
 using StaticArrays
 using Logging
@@ -780,6 +783,264 @@ function advect_diffuse_implicit_y!(C_out::Array{Float64, 3}, C_in::Array{Float6
     end
 end
 
+# ==============================================================================
+#  3D Implicit Advection-Diffusion (TVD) ---
+# ==============================================================================
+"""
+    advect_diffuse_tvd_implicit_x!(C_out, C_in, state, grid, dt, Kh, limiter_func)
+
+Performs the x-sweep of advection and diffusion.
+- Advection is handled by a high-order, flux-limited TVD scheme,
+  implemented as an implicit First-Order Upwind (FOU) solver
+  with an explicit anti-diffusive (TVD) correction.
+- Diffusion is handled by the Crank-Nicolson method.
+
+This combination ensures a high-order, monotonic, and stable solution.
+"""
+function advect_diffuse_tvd_implicit_x!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    u = state.u
+
+    # Pre-allocate buffers for the corrective fluxes (one per row)
+    flux_f_fou = Vector{Float64}(undef, nx + 1)
+    flux_f_lim = Vector{Float64}(undef, nx + 1)
+
+    # Threading over k (vertical layers)
+    Threads.@threads for k in axes(C_in, 3)
+        
+        # Thread-local buffers for the tridiagonal system
+        a = Vector{Float64}(undef, nx - 1) # sub-diagonal
+        b = Vector{Float64}(undef, nx)     # main diagonal
+        c = Vector{Float64}(undef, nx - 1) # super-diagonal
+        d = Vector{Float64}(undef, nx)     # RHS
+
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+
+            # --- Step 1: Calculate Advection Fluxes (TVD and FOU) ---
+            for i_phys_face in 1:(nx + 1)
+                i_glob_face = i_phys_face + ng
+                
+                velocity = u[i_glob_face, j_glob, k]
+                local c_up_far, c_up_near, c_down_near
+                
+                if abs(velocity) < 1e-12
+                    flux_f_fou[i_phys_face] = 0.0
+                    flux_f_lim[i_phys_face] = 0.0
+                    continue
+                end
+
+                if velocity >= 0 # Flow L->R
+                    donor_idx    = i_glob_face - 1
+                    receiver_idx = i_glob_face
+                    c_up_near    = C_in[donor_idx,    j_glob, k]
+                    c_down_near  = C_in[receiver_idx, j_glob, k]
+                    c_up_far     = C_in[donor_idx - 1, j_glob, k]
+                else # Flow R->L
+                    donor_idx    = i_glob_face
+                    receiver_idx = i_glob_face - 1
+                    c_up_near    = C_in[donor_idx,    j_glob, k]
+                    c_down_near  = C_in[receiver_idx, j_glob, k]
+                    c_up_far     = C_in[donor_idx + 1, j_glob, k]
+                end
+
+                face_area = grid.face_area_x[i_glob_face, j_glob, k]
+                
+                # a) Low-order First-Order Upwind (FOU) flux
+                flux_f_fou[i_phys_face] = velocity * c_up_near * face_area
+
+                # b) High-order limited flux (TVD)
+                # This function returns the full flux (v * c_limited * A)
+                flux_f_lim[i_phys_face] = calculate_limited_flux(c_up_far, c_up_near, c_down_near, velocity, face_area, limiter_func)
+            end # end face loop
+
+            # --- Step 2: Build and Solve the Tridiagonal System (Cell Loop) ---
+            for i_phys in 1:nx
+                i_glob = i_phys + ng
+                
+                # --- Advection Terms (FOU) ---
+                u_left = u[i_glob, j_glob, k]
+                u_right = u[i_glob + 1, j_glob, k]
+                dx_i = get_dx_at_face(grid, i_glob, j_glob)
+                dx_ip1 = get_dx_at_face(grid, i_glob + 1, j_glob)
+                
+                cr_left = (dt / dx_i) * u_left
+                cr_right = (dt / dx_ip1) * u_right
+            
+                alpha_adv = max(cr_left, 0)
+                gamma_adv = min(cr_right, 0)
+                beta_adv = max(cr_right, 0) - min(cr_left, 0)
+                
+                # --- Diffusion Terms (Crank-Nicolson) ---
+                # This logic is from the original advect_diffuse_implicit_x!
+                dx_centers = get_dx_centers(grid, i_glob, j_glob)
+                D_num = 0.5 * Kh * dt / (dx_centers^2)
+                
+                # --- LHS: Implicit FOU Advection + Implicit CN Diffusion ---
+                sub_diag  = -alpha_adv - D_num
+                sup_diag  =  gamma_adv - D_num
+                main_diag =  1.0 + beta_adv + 2.0*D_num
+                
+                if i_phys > 1; a[i_phys-1] = sub_diag; end
+                b[i_phys] = main_diag
+                if i_phys < nx; c[i_phys] = sup_diag; end
+                
+                # --- RHS: Explicit Advection Correction + Explicit CN Diffusion ---
+                
+                # a) Advection Correction
+                flux_left_corr  = flux_f_lim[i_phys]     - flux_f_fou[i_phys]
+                flux_right_corr = flux_f_lim[i_phys + 1] - flux_f_fou[i_phys + 1]
+                flux_divergence_corr = flux_right_corr - flux_left_corr
+                RHS_adv_corr = - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence_corr
+
+                # b) Explicit CN Diffusion (from original function)
+                C_left   = C_in[i_glob - 1, j_glob, k]
+                C_center = C_in[i_glob,     j_glob, k]
+                C_right  = C_in[i_glob + 1, j_glob, k]
+                RHS_diff = C_center * (1.0 - 2.0*D_num) + C_left * D_num + C_right * D_num
+                
+                d[i_phys] = RHS_diff + RHS_adv_corr
+
+            end # end cell loop
+
+            # --- Apply no-flux (zero-gradient) boundary conditions ---
+            # (This is from the original diffusion logic)
+            b[1]  += a[1];  a[1] = 0.0
+            b[nx] += c[nx-1]; c[nx-1] = 0.0
+
+            # --- Solve the system ---
+            A = Tridiagonal(a, b, c)
+            solution = A \ d
+            view(C_out, (ng+1):(nx+ng), j_glob, k) .= solution
+
+        end # end j_phys loop
+    end # end k loop
+end # end function
+
+"""
+    advect_diffuse_tvd_implicit_y!(C_out, C_in, state, grid, dt, Kh, limiter_func)
+
+Performs the y-sweep of advection and diffusion using the stable
+TVD (FCT) method combined with Crank-Nicolson diffusion.
+"""
+function advect_diffuse_tvd_implicit_y!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    v = state.v
+
+    # Pre-allocate buffers for the corrective fluxes (one per column)
+    flux_f_fou = Vector{Float64}(undef, ny + 1)
+    flux_f_lim = Vector{Float64}(undef, ny + 1)
+
+    # Threading over k (vertical layers)
+    Threads.@threads for k in axes(C_in, 3)
+        
+        # Thread-local buffers for the tridiagonal system
+        a = Vector{Float64}(undef, ny - 1) # sub-diagonal
+        b = Vector{Float64}(undef, ny)     # main diagonal
+        c = Vector{Float64}(undef, ny - 1) # super-diagonal
+        d = Vector{Float64}(undef, ny)     # RHS
+
+        for i_phys in 1:nx
+            i_glob = i_phys + ng
+
+            # --- Step 1: Calculate Advection Fluxes (TVD and FOU) ---
+            for j_phys_face in 1:(ny + 1)
+                j_glob_face = j_phys_face + ng
+                
+                velocity = v[i_glob, j_glob_face, k]
+                local c_up_far, c_up_near, c_down_near
+                
+                if abs(velocity) < 1e-12
+                    flux_f_fou[j_phys_face] = 0.0
+                    flux_f_lim[j_phys_face] = 0.0
+                    continue
+                end
+
+                if velocity >= 0 # Flow Bottom->Top
+                    donor_idx    = j_glob_face - 1
+                    receiver_idx = j_glob_face
+                    c_up_near    = C_in[i_glob, donor_idx,    k]
+                    c_down_near  = C_in[i_glob, receiver_idx, k]
+                    c_up_far     = C_in[i_glob, donor_idx - 1, k]
+                else # Flow Top->Bottom
+                    donor_idx    = j_glob_face
+                    receiver_idx = j_glob_face - 1
+                    c_up_near    = C_in[i_glob, donor_idx,    k]
+                    c_down_near  = C_in[i_glob, receiver_idx, k]
+                    c_up_far     = C_in[i_glob, donor_idx + 1, k]
+                end
+
+                face_area = grid.face_area_y[i_glob, j_glob_face, k]
+                
+                # a) Low-order First-Order Upwind (FOU) flux
+                flux_f_fou[j_phys_face] = velocity * c_up_near * face_area
+
+                # b) High-order limited flux (TVD)
+                flux_f_lim[j_phys_face] = calculate_limited_flux(c_up_far, c_up_near, c_down_near, velocity, face_area, limiter_func)
+            end # end face loop
+
+            # --- Step 2: Build and Solve the Tridiagonal System (Cell Loop) ---
+            for j_phys in 1:ny
+                j_glob = j_phys + ng
+                
+                # --- Advection Terms (FOU) ---
+                v_bottom = v[i_glob, j_glob,     k]
+                v_top    = v[i_glob, j_glob + 1, k]
+                dy_j = get_dy_at_face(grid, i_glob, j_glob)
+                dy_jp1 = get_dy_at_face(grid, i_glob, j_glob + 1)
+                
+                cr_bottom = (dt / dy_j) * v_bottom
+                cr_top    = (dt / dy_jp1) * v_top
+            
+                alpha_adv = max(cr_bottom, 0)
+                gamma_adv = min(cr_top, 0)
+                beta_adv = max(cr_top, 0) - min(cr_bottom, 0)
+                
+                # --- Diffusion Terms (Crank-Nicolson) ---
+                dy_centers = get_dy_centers(grid, i_glob, j_glob)
+                D_num = 0.5 * Kh * dt / (dy_centers^2)
+                
+                # --- LHS: Implicit FOU Advection + Implicit CN Diffusion ---
+                sub_diag  = -alpha_adv - D_num
+                sup_diag  =  gamma_adv - D_num
+                main_diag =  1.0 + beta_adv + 2.0*D_num
+                
+                if j_phys > 1; a[j_phys - 1] = sub_diag; end
+                b[j_phys] = main_diag
+                if j_phys < ny; c[j_phys] = sup_diag; end
+                
+                # --- RHS: Explicit Advection Correction + Explicit CN Diffusion ---
+                
+                # a) Advection Correction
+                flux_bottom_corr  = flux_f_lim[j_phys]     - flux_f_fou[j_phys]
+                flux_top_corr = flux_f_lim[j_phys + 1] - flux_f_fou[j_phys + 1]
+                flux_divergence_corr = flux_top_corr - flux_bottom_corr
+                RHS_adv_corr = - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence_corr
+
+                # b) Explicit CN Diffusion
+                C_bottom = C_in[i_glob, j_glob - 1, k]
+                C_center = C_in[i_glob, j_glob,     k]
+                C_top    = C_in[i_glob, j_glob + 1, k]
+                RHS_diff = C_center * (1.0 - 2.0*D_num) + C_bottom * D_num + C_top * D_num
+                
+                d[j_phys] = RHS_diff + RHS_adv_corr
+
+            end # end cell loop
+
+            # --- Apply no-flux (zero-gradient) boundary conditions ---
+            b[1]  += a[1];  a[1] = 0.0
+            b[ny] += c[ny-1]; c[ny-1] = 0.0
+
+            # --- Solve the system ---
+            A = Tridiagonal(a, b, c)
+            solution = A \ d
+            view(C_out, i_glob, (ng+1):(ny+ng), k) .= solution
+
+        end # end i_phys loop
+    end # end k loop
+end
 
 @inline get_grid_dims(grid::CartesianGrid) = Tuple(grid.dims)
 @inline get_grid_dims(grid::CurvilinearGrid) = (grid.nx, grid.ny, grid.nz)

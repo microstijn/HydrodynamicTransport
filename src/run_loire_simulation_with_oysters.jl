@@ -4,8 +4,9 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 using HydrodynamicTransport
+using HydrodynamicTransport.FluxLimitersModule
 using NCDatasets
-using Proj
+import Proj
 
 println("--- HydrodynamicTransport.jl: Loire Estuary Sorption, Sedimentation, and Oyster Simulation ---")
 
@@ -37,9 +38,6 @@ if !haskey(hydro_data.var_map, :salt); state.salinity .= 25.0; end
 
 
 # Source Configuration
-
-using Proj
-
 println("Configuring point sources for dissolved virus...")
 sources = PointSource[]
 source_locations = [
@@ -154,7 +152,7 @@ oyster_locations = [
     (name="La Couplasse", lon=-2.0322, lat=47.0263) # 47°1'34.7"N, 2°1'55.9"W
 ]
 
-
+virtual_oysters = VirtualOyster[]
 for loc in oyster_locations
     i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
     if i !== nothing && j !== nothing
@@ -175,7 +173,7 @@ start_time = 0.0
 end_time = 1*96 * 3600.0 # Run for 12 hours
 
 #end_time = 30*10.0 # Run for 12 hours
-dt = 5.0
+dt = 20.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 output_directory = raw"D:\PreVir\loire_virus_sim_outputADi"
 output_interval_seconds = 60 * 60.0
@@ -193,7 +191,7 @@ final_state = run_simulation(
     ds,
     hydro_data, 
     use_adaptive_dt         = true,
-    cfl_max                 = 0.9,
+    cfl_max                 = 50.0,
     dt_max                  = 1500.0,
     dt_min                  = 0.01,
     dt_growth_factor        = 1.1,
@@ -202,7 +200,8 @@ final_state = run_simulation(
     virtual_oysters         = virtual_oysters,
     oyster_tracers          = oyster_tracers,
     functional_interactions = functional_interactions,
-    advection_scheme        = :TVD,
+    advection_scheme        = :ImplicitADI_3D,
+    limiter_func            = van_leer,      
     D_crit                  = 0.05,
     output_dir              = output_directory,
     output_interval         = output_interval_seconds,

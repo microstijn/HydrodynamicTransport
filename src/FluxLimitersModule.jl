@@ -65,7 +65,7 @@ and maintain monotonicity.
 - `Float64`: The mass flux across the cell face.
 """
 function calculate_limited_flux(c_up_far::Float64, c_up_near::Float64, c_down_near::Float64, velocity::Float64, face_area::Float64, limiter_func::Function)
-    # 1. Calculate the smoothness parameter 'r'
+    # Calculate the smoothness parameter 'r'
     numerator = c_up_near - c_up_far
     denominator = c_down_near - c_up_near
     
@@ -78,15 +78,14 @@ function calculate_limited_flux(c_up_far::Float64, c_up_near::Float64, c_down_ne
         numerator / denominator
     end
 
-    # 2. Calculate the limiter function phi(r) using the provided function
+    # Calculate the limiter function phi(r) using the provided function
     phi = limiter_func(r)
 
-    # 3. Calculate the limited concentration at the face
+    # Calculate the limited concentration at the face
     # This is C_upwind + 0.5 * phi * (C_downwind - C_upwind)
     c_face_limited = c_up_near + 0.5 * phi * (c_down_near - c_up_near)
 
-    # 4. Calculate the final flux
-  
+    # Calculate the final flux and return value
   return velocity * c_face_limited * face_area
 end
 

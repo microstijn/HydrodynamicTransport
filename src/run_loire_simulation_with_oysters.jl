@@ -5,7 +5,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Revise
 using HydrodynamicTransport
 using NCDatasets
-using Proj
+import Proj
 
 println("--- HydrodynamicTransport.jl: Loire Estuary Sorption, Sedimentation, and Oyster Simulation ---")
 
@@ -37,9 +37,6 @@ if !haskey(hydro_data.var_map, :salt); state.salinity .= 25.0; end
 
 
 # Source Configuration
-
-using Proj
-
 println("Configuring point sources for dissolved virus...")
 sources = PointSource[]
 source_locations = [
@@ -154,7 +151,7 @@ oyster_locations = [
     (name="La Couplasse", lon=-2.0322, lat=47.0263) # 47°1'34.7"N, 2°1'55.9"W
 ]
 
-
+virtual_oysters = VirtualOyster[]
 for loc in oyster_locations
     i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
     if i !== nothing && j !== nothing

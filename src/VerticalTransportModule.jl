@@ -207,146 +207,144 @@ end
 # 3D Implicit Advection-Diffusion (TVD) 
 # ==============================================================================
 
-function advect_diffuse_tvd_implicit_z!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kz::Float64, limiter_func::Function)
+# In src/VerticalTransportModule.jl
+
+function advect_diffuse_tvd_implicit_z!(
+    C_out::Array{Float64, 3},
+    C_in::Array{Float64, 3},
+    state::State,
+    grid::AbstractGrid,
+    dt::Float64,
+    Kz::Float64,
+    limiter_func::Function,
+    D_crit::Float64
+)
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     ng = grid.ng
-    w = state.w
+    w_hydro = state.w
+    volume_threshold = 1e-12 # Threshold for considering volume zero
     if nz <= 1; C_out .= C_in; return; end
 
-    # Pre-allocate buffers for the corrective fluxes (one per column)
     flux_f_fou = Vector{Float64}(undef, nz + 1)
     flux_f_lim = Vector{Float64}(undef, nz + 1)
 
-    # Threading over the horizontal plane
     Threads.@threads for j_phys in 1:ny
-        
-        # Thread-local buffers for the tridiagonal system
-        a = Vector{Float64}(undef, nz - 1) # sub-diagonal
-        b = Vector{Float64}(undef, nz)     # main diagonal
-        c = Vector{Float64}(undef, nz - 1) # super-diagonal
-        d = Vector{Float64}(undef, nz)     # RHS
+
+        a = Vector{Float64}(undef, nz - 1)
+        b = Vector{Float64}(undef, nz)
+        c = Vector{Float64}(undef, nz - 1)
+        d = Vector{Float64}(undef, nz)
 
         for i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
-            # --- Step 1: Calculate Advection Fluxes (TVD and FOU) ---
-            
-            # --- Boundary Faces (k=1 and k=nz+1) ---
-            # Enforce zero flux at the solid bottom and top boundaries
-            flux_f_fou[1] = 0.0
-            flux_f_lim[1] = 0.0
-            flux_f_fou[nz+1] = 0.0
-            flux_f_lim[nz+1] = 0.0
-
-            # --- Interior Faces (k=2 to k=nz) ---
+            # --- Step 1: Calculate Advection Fluxes (Includes D_crit checks) ---
+            # ... (This part remains unchanged from the previous version) ...
+            flux_f_fou[1] = 0.0; flux_f_lim[1] = 0.0
+            flux_f_fou[nz+1] = 0.0; flux_f_lim[nz+1] = 0.0
             for k_phys_face in 2:nz
-                
-                velocity = w[i_glob, j_glob, k_phys_face]
-                local c_up_far, c_up_near, c_down_near
-                
+                velocity = w_hydro[i_glob, j_glob, k_phys_face]
+                local upstream_k
+                if velocity >= 0; upstream_k = k_phys_face - 1; else; upstream_k = k_phys_face; end
+                if 1 <= upstream_k <= nz
+                    dz_upstream = get_dz_centers(grid, i_glob, j_glob, upstream_k)
+                    if dz_upstream < D_crit; velocity = 0.0; end
+                else; velocity = 0.0; end
                 if abs(velocity) < 1e-12
-                    flux_f_fou[k_phys_face] = 0.0
-                    flux_f_lim[k_phys_face] = 0.0
-                    continue
+                    flux_f_fou[k_phys_face] = 0.0; flux_f_lim[k_phys_face] = 0.0; continue
                 end
-
-                local donor_idx, receiver_idx
-                if velocity >= 0 # Flow Bottom->Top (positive k)
-                    donor_idx    = k_phys_face - 1
-                    receiver_idx = k_phys_face
-                else # Flow Top->Bottom (negative k)
-                    donor_idx    = k_phys_face
-                    receiver_idx = k_phys_face - 1
-                end
-                
-                c_up_near    = C_in[i_glob, j_glob, donor_idx]
-                c_down_near  = C_in[i_glob, j_glob, receiver_idx]
-
-                # Get face area
-                face_area = if isa(grid, CartesianGrid)
-                    # Use the face area of the *donor* cell
-                    grid.face_area_z[i_glob, j_glob, donor_idx]
-                else
-                    1.0 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
-                end
-                
-                # a) Low-order First-Order Upwind (FOU) flux
+                local donor_idx, receiver_idx, c_up_far, c_up_near, c_down_near
+                if velocity >= 0; donor_idx = k_phys_face - 1; receiver_idx = k_phys_face;
+                else; donor_idx = k_phys_face; receiver_idx = k_phys_face - 1; end
+                c_up_near = C_in[i_glob, j_glob, donor_idx]; c_down_near = C_in[i_glob, j_glob, receiver_idx]
+                face_area = isa(grid, CartesianGrid) ? grid.face_area_z[i_glob, j_glob, k_phys_face] : 1.0 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
                 flux_f_fou[k_phys_face] = velocity * c_up_near * face_area
-                
-                # --- b) High-order limited flux (TVD) ---
-                # Use low-order FOU at boundary-adjacent faces where we can't get c_up_far
-                if (velocity >= 0 && k_phys_face == 2) || (velocity < 0 && k_phys_face == nz)
+                if (velocity >= 0 && donor_idx <= 1) || (velocity < 0 && donor_idx >= nz-1) # Typo fixed: nz-1, not nz
                     flux_f_lim[k_phys_face] = flux_f_fou[k_phys_face]
                 else
-                    # This is now safe, as k-1 and k+1 are valid
-                    if velocity >= 0
-                        c_up_far = C_in[i_glob, j_glob, donor_idx - 1]
-                    else
-                        c_up_far = C_in[i_glob, j_glob, donor_idx + 1]
-                    end
+                    if velocity >= 0; c_up_far = C_in[i_glob, j_glob, donor_idx - 1];
+                    else; c_up_far = C_in[i_glob, j_glob, donor_idx + 1]; end
                     flux_f_lim[k_phys_face] = calculate_limited_flux(c_up_far, c_up_near, c_down_near, velocity, face_area, limiter_func)
                 end
-            end # end face loop
+            end
 
-            # --- Step 2: Build and Solve the Tridiagonal System (Cell Loop) ---
+
+            # --- Step 2: Build and Solve System ---
             for k_phys in 1:nz
-                
-                # --- Advection Terms (FOU) ---
-                w_bottom = w[i_glob, j_glob, k_phys]
-                w_top    = w[i_glob, j_glob, k_phys + 1]
-                
-                # --- FIX: Call the new, robust helper ---
+                 cell_volume = grid.volume[i_glob, j_glob, k_phys]
+
+                # --- FIX: Handle Dry Cells ---
+                if cell_volume < volume_threshold
+                    if k_phys > 1;  a[k_phys - 1] = 0.0; end
+                    b[k_phys] = 1.0
+                    if k_phys < nz; c[k_phys]     = 0.0; end
+                    d[k_phys] = C_in[i_glob, j_glob, k_phys] # Ensure C_out = C_in
+                    continue # Skip rest of calculation
+                end
+                # --- END FIX ---
+
+                # --- Calculations for WET cells ---
+                w_bottom = w_hydro[i_glob, j_glob, k_phys]
+                w_top    = w_hydro[i_glob, j_glob, k_phys + 1]
+
+                 # --- WET/DRY Check for Cr numbers ---
+                if w_bottom >= 0 && k_phys > 1 && get_dz_centers(grid, i_glob, j_glob, k_phys-1) < D_crit; w_bottom=0.0; end
+                if w_bottom < 0 && get_dz_centers(grid, i_glob, j_glob, k_phys) < D_crit; w_bottom=0.0; end
+                if w_top >= 0 && get_dz_centers(grid, i_glob, j_glob, k_phys) < D_crit; w_top=0.0; end
+                if w_top < 0 && k_phys < nz && get_dz_centers(grid, i_glob, j_glob, k_phys+1) < D_crit; w_top=0.0; end
+                 # ---
+
                 dz_k = get_dz_at_face(grid, i_glob, j_glob, k_phys)
                 dz_kp1 = get_dz_at_face(grid, i_glob, j_glob, k_phys + 1)
-                
-                cr_bottom = (dt / dz_k) * w_bottom
-                cr_top    = (dt / dz_kp1) * w_top
-            
+                cr_bottom = (dz_k > 1e-9) ? (dt / dz_k) * w_bottom : 0.0
+                cr_top    = (dz_kp1 > 1e-9) ? (dt / dz_kp1) * w_top : 0.0
                 alpha_adv = max(cr_bottom, 0)
                 gamma_adv = min(cr_top, 0)
                 beta_adv = max(cr_top, 0) - min(cr_bottom, 0)
-                
-                # --- Diffusion Terms (Crank-Nicolson) ---
+
                 dz_centers = get_dz_centers(grid, i_glob, j_glob, k_phys)
-                D_num = 0.5 * Kz * dt / (dz_centers^2)
-                
-                # --- LHS: Implicit FOU Advection + Implicit CN Diffusion ---
+                D_num = (dz_centers > 1e-9) ? (0.5 * Kz * dt / (dz_centers^2)) : 0.0
+
                 sub_diag  = -alpha_adv - D_num
                 sup_diag  =  gamma_adv - D_num
                 main_diag =  1.0 + beta_adv + 2.0*D_num
-                
+
                 if k_phys > 1;  a[k_phys - 1] = sub_diag; end
                 b[k_phys] = main_diag
                 if k_phys < nz; c[k_phys]     = sup_diag; end
-                
-                # --- RHS: Explicit Advection Correction + Explicit CN Diffusion ---
-                
-                # a) Advection Correction
+
                 flux_bottom_corr  = flux_f_lim[k_phys]     - flux_f_fou[k_phys]
                 flux_top_corr = flux_f_lim[k_phys + 1] - flux_f_fou[k_phys + 1]
                 flux_divergence_corr = flux_top_corr - flux_bottom_corr
-                RHS_adv_corr = - (dt / grid.volume[i_glob, j_glob, k_phys]) * flux_divergence_corr
+                # Volume is guaranteed > volume_threshold here
+                RHS_adv_corr = - (dt / cell_volume) * flux_divergence_corr
 
-                # b) Explicit CN Diffusion (with boundary conditions)
-                # Apply no-flux (zero-gradient) condition: C_bottom = C_center, C_top = C_center
                 C_center = C_in[i_glob, j_glob, k_phys]
                 C_bottom = (k_phys == 1)  ? C_center : C_in[i_glob, j_glob, k_phys - 1]
                 C_top    = (k_phys == nz) ? C_center : C_in[i_glob, j_glob, k_phys + 1]
-                
                 RHS_diff = C_center * (1.0 - 2.0*D_num) + C_bottom * D_num + C_top * D_num
-                
+
                 d[k_phys] = RHS_diff + RHS_adv_corr
 
-            end # end cell loop
+            end # end cell loop (k_phys)
 
-            # --- Apply no-flux (zero-gradient) boundary conditions to implicit matrix ---
-            # This handles the diffusion part of the LHS
-            if nz > 1
-                b[1]  += a[1];  a[1] = 0.0
-                b[nz] += c[nz-1]; c[nz-1] = 0.0
-            end
+            # --- Adjust Matrix for Boundary Conditions & Solve ---
+             if grid.volume[i_glob, j_glob, 1] >= volume_threshold && nz > 1 # Check if cell 1 is wet
+                 b[1]  += a[1];  a[1] = 0.0
+             elseif nz > 1 # Cell 1 is dry
+                 b[1] = 1.0
+             end
+             if grid.volume[i_glob, j_glob, nz] >= volume_threshold && nz > 1 # Check if cell nz is wet
+                 b[nz] += c[nz-1]; c[nz-1] = 0.0
+             elseif nz > 1 # Cell nz is dry
+                 b[nz] = 1.0
+             end
+             # Handle nz=1 case
+             if nz == 1 && grid.volume[i_glob, j_glob, 1] < volume_threshold
+                 b[1] = 1.0
+             end
 
-            # --- Solve the system ---
+
             A = Tridiagonal(a, b, c)
             solution = A \ d
             view(C_out, i_glob, j_glob, :) .= solution

@@ -97,7 +97,9 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             state_backup = deepcopy(state)
             oysters_backup = deepcopy(virtual_oysters)
 
-            apply_boundary_conditions!(state_backup, grid, boundary_conditions)
+            if  time == start_time
+                apply_boundary_conditions!(state_backup, grid, boundary_conditions)
+            end
             
             # Hydrodynamics Step 
             if ds !== nothing && hydro_data !== nothing
@@ -115,15 +117,22 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                     C_buffer1 = state_backup._buffer1[tracer_name]
                     C_buffer2 = state_backup._buffer2[tracer_name]
 
-                    advect_diffuse_tvd_implicit_x!(C_buffer1, C_initial, state_backup, grid, trial_dt, Kh, limiter_func)
-                    advect_diffuse_tvd_implicit_y!(C_buffer2, C_buffer1, state_backup, grid, trial_dt, Kh, limiter_func)
-                    advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, state_backup, grid, trial_dt, Kz, limiter_func)
+                    advect_diffuse_tvd_implicit_x!(C_buffer1, C_initial, state_backup, grid, trial_dt, Kh, limiter_func, D_crit)
+                    advect_diffuse_tvd_implicit_y!(C_buffer2, C_buffer1, state_backup, grid, trial_dt, Kh, limiter_func, D_crit)
+                    advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, state_backup, grid, trial_dt, Kz, limiter_func, D_crit)
                 end
             else
                 horizontal_transport!(state_backup, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
                 vertical_transport!(state_backup, grid, trial_dt)
             end
-            
+
+            # --- APPLY CLIPPING IMMEDIATELY AFTER TRANSPORT ---
+            #=
+            for C_array in values(state_backup.tracers)
+                clamp!(C_array, 0.0, Inf)
+            end
+            =#
+
             # --- Physics Steps ---
             deposition = apply_settling!(state_backup, grid, trial_dt, sediment_params)
             bed_exchange!(state_backup, grid, trial_dt, deposition, sediment_params)

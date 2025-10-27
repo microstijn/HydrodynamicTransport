@@ -18,3 +18,6 @@ src/wt_dry_verification.jl
 repomix-output.xmladd_sins.xml
 repomix-output.xmlsediment_implicit.xml
 repomix-output.xmlfluxlimiting.xml
+settling_bedex_diagram_dark.png
+staggered_flux_advantage.png
+adaptive_timestep_logic_dark.png

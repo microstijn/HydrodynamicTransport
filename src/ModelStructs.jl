@@ -38,7 +38,7 @@ end
 mutable struct State
     tracers::Dict{Symbol, Array{Float64, 3}}
     _buffer1::Dict{Symbol, Array{Float64, 3}}  # Renamed from _buffers
-    _buffer2::Dict{Symbol, Array{Float64, 3}}  # NEW: Second buffer for 3-sweep ADI
+    _buffer2::Dict{Symbol, Array{Float64, 3}}  # Second buffer for 3-sweep ADI
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
     zeta::Array{Float64, 3}
     flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes

@@ -8,26 +8,17 @@ using HydrodynamicTransport.FluxLimitersModule
 using NCDatasets
 import Proj
 
-println("--- HydrodynamicTransport.jl: Loire Estuary Sorption, Sedimentation, and Oyster Simulation ---")
-
-# --- 1. Data Configuration ---
-# IMPORTANT: Update this path to the location of your NetCDF file.
+# Data Configuration 
 loire_filepath = raw"D:\PreVir\loireModel\MARS3D\run_curviloire_2018.nc"
 
-println("Autodetecting variables from: $loire_filepath")
-hydro_data = create_hydrodynamic_data_from_file(loire_filepath)
+hydro_data = create_hydrodynamic_data_from_file(loire_filepath);
 
-# --- 2. Grid and State Initialization ---
-println("Connecting to NetCDF file...")
-ds = NCDataset(loire_filepath)
-
-println("Initializing Curvilinear Grid...")
-grid = initialize_curvilinear_grid(loire_filepath)
-
-println("Initializing State with Dissolved and Sorbed tracers...")
+# Grid and State Initialization
+ds = NCDataset(loire_filepath);
+grid = initialize_curvilinear_grid(loire_filepath);
 tracer_names = (:Virus_Dissolved, :Virus_Sorbed)
 sediment_tracer_list = [:Virus_Sorbed]
-state = initialize_state(grid, ds, tracer_names; sediment_tracers=sediment_tracer_list)
+state = initialize_state(grid, ds, tracer_names; sediment_tracers=sediment_tracer_list);
 
 # Set a uniform background TSS concentration (e.g., 10.0 mg/L, which is g/m^3)
 # A real simulation might read this from the NetCDF file if available.
@@ -36,9 +27,7 @@ state.tss .= 10.0
 if !haskey(hydro_data.var_map, :temp); state.temperature .= 15.0; end
 if !haskey(hydro_data.var_map, :salt); state.salinity .= 25.0; end
 
-
 # Source Configuration
-println("Configuring point sources for dissolved virus...")
 sources = PointSource[]
 source_locations = [
     (name = "Nantes",        lon = -1.549464,  lat = 47.197319),
@@ -65,8 +54,6 @@ begin
     append!(source_locations, new_data)
 end
 
-
-
 for loc in source_locations
     i, j = lonlat_to_ij(grid, loc.lon, loc.lat)
     if i !== nothing && j !== nothing
@@ -77,14 +64,12 @@ for loc in source_locations
     end
 end
 
-# --- 4. Define Sediment Parameters for the Sorbed Tracer ---
-println("Defining sediment parameters for :Virus_Sorbed...")
+# Define Sediment Parameters for the Sorbed Tracer 
 sediment_params = Dict(
     :Virus_Sorbed => SedimentParams(ws = 0.0005, erosion_rate = 1e-7, tau_ce = 0.1)
 )
 
-# --- 5. Define the Adsorption/Desorption Functional Interaction ---
-println("Defining adsorption-desorption interaction function...")
+# Define the Adsorption/Desorption Functional Interaction 
 function implicit_adsorption_desorption(concentrations, environment, dt)
     C_diss_old = max(0.0, concentrations[:Virus_Dissolved])
     C_sorb_old = max(0.0, concentrations[:Virus_Sorbed])
@@ -107,17 +92,21 @@ virus_interaction = FunctionalInteraction(
 
 
 # decay
-
 function create_decay_interaction(params::DecayParams)
     function decay_function(concentrations, environment, dt)
+
         C_old = max(0.0, concentrations[params.tracer_name])
+
         if C_old <= 1e-12; return Dict(params.tracer_name => 0.0); end
+
         T = environment.T
+
         k_temp = if params.temp_theta > 1.0 && !isnan(T)
             params.base_rate * params.temp_theta^(T - params.temp_ref)
         else
             params.base_rate
         end
+
         UVB = environment.UVB
         k_light = if params.light_coeff > 0.0 && !isnan(UVB)
             params.light_coeff * UVB
@@ -145,11 +134,13 @@ decay_interaction = create_decay_interaction(decay_params)
 
 functional_interactions = [virus_interaction, decay_interaction]
 
-# --- 6. Oyster Configuration ---
-println("Configuring virtual oysters...")
+# Oyster Configuration 
 oyster_params = OysterParams() # Use default biological parameters
 oyster_locations = [
-    (name="La Couplasse", lon=-2.0322, lat=47.0263) # 47°1'34.7"N, 2°1'55.9"W
+    (name = "La Couplasse", lon=-2.0322, lat=47.0263),
+    (name = "Plage de Villès-Martin",  lon = -2.225092, lat = 47.257386),
+    (name = "Phare à terre de Villès-Martin",  lon = -2.227273, lat = 47.255451),
+    (name = "Villès-Martin L'embouchure de la Loire",  lon = -2.223111, lat = 47.259898),
 ]
 
 virtual_oysters = VirtualOyster[]
@@ -168,22 +159,16 @@ end
 
 oyster_tracers = (dissolved=:Virus_Dissolved, sorbed=:Virus_Sorbed)
 
-# --- 7. Simulation and Output Parameters ---
+# Simulation and Output Parameters 
 start_time = 6 * 3600.0
 end_time = 120 * 3600.0 # Run for 12 hours
-
 #end_time = 30*10.0 # Run for 12 hours
 dt = 20.0
 bcs = [OpenBoundary(side=:East), OpenBoundary(side=:West), OpenBoundary(side=:North), OpenBoundary(side=:South)]
 output_directory = raw"D:\PreVir\loire_virus_sim_outputADi"
 output_interval_seconds = 60 * 60.0
 
-# --- 8. Run the Simulation ---
-println("\n--- Starting simulation ---")
-println("Total duration: $(end_time / 3600.0) hours")
-println("Time step (dt): $dt seconds")
-println("Output will be saved to: $output_directory")
-
+# Run the Simulation
 restart_file = nothing
 
 final_state = run_simulation(
@@ -214,8 +199,9 @@ maximum(final_state.tracers[:Virus_Dissolved][:, :, 1])
 sum(final_state.tracers[:Virus_Sorbed][:, :, 1])
 sum(final_state.bed_mass[:Virus_Sorbed])
 
-# 9. Clean Up and Summarize ---
+# Clean
 close(ds)
 
 println("\n--- Simulation Complete ---")
 println("Final simulation time: $(round(final_state.time / 3600.0, digits=2)) hours.")
+

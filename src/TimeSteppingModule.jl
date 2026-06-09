@@ -13,6 +13,7 @@ using ..HydrodynamicTransport.BoundaryConditionsModule
 using ..HydrodynamicTransport.SettlingModule
 using ..HydrodynamicTransport.BedExchangeModule
 using ..HydrodynamicTransport.OysterModule
+using ..HydrodynamicTransport.ReceptorMonitoringModule: ReceptorMonitor, write_receptor_monitor!, flush_receptor_monitor!
 using ..HydrodynamicTransport.UtilsModule: calculate_max_cfl_term
 using ..HydrodynamicTransport.FluxLimitersModule 
 using ProgressMeter
@@ -50,6 +51,10 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         D_crit::Float64=0.0,
                         output_dir::Union{String, Nothing}=nothing,
                         output_interval::Union{Float64, Nothing}=nothing,
+                        write_full_state::Bool=true,
+                        full_state_output_interval::Union{Float64, Nothing}=output_interval,
+                        receptor_monitors::Vector{ReceptorMonitor}=ReceptorMonitor[],
+                        receptor_monitor_interval::Union{Float64, Nothing}=output_interval,
                         restart_from::Union{String, Nothing}=nothing)
 
     local state_to_run, effective_start_time
@@ -72,19 +77,38 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     max_dt_taken = 0.0
     start_wall_time = time_ns()
 
-    next_output_time = if output_interval !== nothing
-        ceil((time + 1e-9) / output_interval) * output_interval
+    next_full_state_output_time = if full_state_output_interval !== nothing
+        ceil((time + 1e-9) / full_state_output_interval) * full_state_output_interval
     else
         Inf
     end
-    if output_dir !== nothing; mkpath(output_dir); end
+
+    next_receptor_monitor_time = if receptor_monitor_interval !== nothing
+        ceil((time + 1e-9) / receptor_monitor_interval) * receptor_monitor_interval
+    else
+        Inf
+    end
+
+    if output_dir !== nothing && write_full_state
+        mkpath(output_dir)
+    end
     
     desc_str = (ds !== nothing) ? "Simulating..." : "Simulating (test mode)..."
     pbar = Progress(floor(Int, end_time - time); desc=desc_str, dt=1.0)
 
     while time < end_time
         trial_dt = use_adaptive_dt ? min(current_dt, dt_max) : dt
-        trial_dt = min(trial_dt, end_time - time, next_output_time - time)
+
+        # Consider both output clocks for finding the next dt bound
+        dt_bound = end_time - time
+        if write_full_state && next_full_state_output_time < Inf
+            dt_bound = min(dt_bound, next_full_state_output_time - time)
+        end
+        if !isempty(receptor_monitors) && next_receptor_monitor_time < Inf
+            dt_bound = min(dt_bound, next_receptor_monitor_time - time)
+        end
+
+        trial_dt = min(trial_dt, dt_bound)
 
         if use_adaptive_dt && trial_dt < dt_min
             println("\nWarning: Timestep below minimum threshold. Stopping simulation.")
@@ -154,10 +178,17 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         time += trial_dt
         state.time = time
         
-        if output_dir !== nothing && abs(time - next_output_time) < 1e-9
+        if !isempty(receptor_monitors) && time >= next_receptor_monitor_time - 1e-9
+            for monitor in receptor_monitors
+                write_receptor_monitor!(monitor, grid, state, time)
+            end
+            next_receptor_monitor_time += receptor_monitor_interval
+        end
+
+        if write_full_state && output_dir !== nothing && time >= next_full_state_output_time - 1e-9
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
             jldsave(output_filename; state=state, virtual_oysters=virtual_oysters)
-            next_output_time += output_interval
+            next_full_state_output_time += full_state_output_interval
         end
 
         elapsed_wall_time_min = (time_ns() - start_wall_time) / 1e9 / 60
@@ -170,6 +201,12 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         ])
     end
     ProgressMeter.finish!(pbar)
+
+    # Flush all monitors at the end of the simulation
+    for monitor in receptor_monitors
+        flush_receptor_monitor!(monitor)
+    end
+
     return state
 end
 
@@ -197,21 +234,35 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   limiter_func::Function=FluxLimitersModule.van_leer, # <-- NEW ARGUMENT
                                   Kh::Float64=1.0,
                                   Kz::Float64=1e-4,
-                                  D_crit::Float64=0.0)
+                                  D_crit::Float64=0.0,
+                                  write_full_state::Bool=true,
+                                  full_state_output_interval::Union{Float64, Nothing}=output_interval,
+                                  receptor_monitors::Vector{ReceptorMonitor}=ReceptorMonitor[],
+                                  receptor_monitor_interval::Union{Float64, Nothing}=output_interval)
                                   
     state = deepcopy(initial_state)
     time = start_time
     current_dt = dt
     results = [(state=deepcopy(state), oysters=deepcopy(virtual_oysters))]
     timesteps = [start_time]
-    next_output_time = start_time + output_interval
+    next_full_state_output_time = start_time + (full_state_output_interval !== nothing ? full_state_output_interval : output_interval)
+    next_receptor_monitor_time = start_time + (receptor_monitor_interval !== nothing ? receptor_monitor_interval : output_interval)
 
     desc_str = (ds !== nothing) ? "Simulating & Storing (Real Data)..." : "Simulating & Storing (Test Mode)..."
     pbar = Progress(floor(Int, end_time - time); desc=desc_str, dt=1.0)
     
     while time < end_time
         trial_dt = use_adaptive_dt ? min(current_dt, dt_max) : dt
-        trial_dt = min(trial_dt, end_time - time, next_output_time - time)
+
+        dt_bound = end_time - time
+        if write_full_state
+            dt_bound = min(dt_bound, next_full_state_output_time - time)
+        end
+        if !isempty(receptor_monitors)
+            dt_bound = min(dt_bound, next_receptor_monitor_time - time)
+        end
+
+        trial_dt = min(trial_dt, dt_bound)
 
         if use_adaptive_dt && trial_dt < dt_min
             @warn "\nWarning: Timestep below minimum threshold. Stopping simulation."
@@ -277,14 +328,26 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
         time += trial_dt
         state.time = time
         
-        if abs(time - next_output_time) < 1e-9
+        if !isempty(receptor_monitors) && time >= next_receptor_monitor_time - 1e-9
+            for monitor in receptor_monitors
+                write_receptor_monitor!(monitor, grid, state, time)
+            end
+            next_receptor_monitor_time += receptor_monitor_interval !== nothing ? receptor_monitor_interval : output_interval
+        end
+
+        if write_full_state && time >= next_full_state_output_time - 1e-9
             push!(results, (state=deepcopy(state), oysters=deepcopy(virtual_oysters)))
             push!(timesteps, time)
-            next_output_time += output_interval
+            next_full_state_output_time += full_state_output_interval !== nothing ? full_state_output_interval : output_interval
         end
         ProgressMeter.update!(pbar, floor(Int, time - start_time))
     end
     ProgressMeter.finish!(pbar)
+
+    for monitor in receptor_monitors
+        flush_receptor_monitor!(monitor)
+    end
+
     return results, timesteps
 end
 

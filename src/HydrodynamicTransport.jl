@@ -22,6 +22,7 @@ include("BedExchangeModule.jl")
 # Added oyster
 include("OysterModule.jl")
 
+include("ReceptorMonitoringModule.jl")
 include("TimeSteppingModule.jl")
 
 
@@ -38,6 +39,7 @@ using .VerticalTransportModule
 using .SourceSinkModule
 using .HydrodynamicsModule
 using .OysterModule
+using .ReceptorMonitoringModule
 using .TimeSteppingModule
 using .UtilsModule
 # Note: The new modules are used internally by TimeSteppingModule,
@@ -50,6 +52,8 @@ export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, Po
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
        SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster # Export the new struct
        
+export ReceptorMonitor, create_receptor_monitor_from_lonlat, create_receptor_monitor_from_xy, flush_receptor_monitor!
+
 # Functions from GridModule.jl
 export initialize_cartesian_grid, initialize_curvilinear_grid
 

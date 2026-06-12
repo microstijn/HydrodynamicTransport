@@ -74,58 +74,80 @@ function update_hydrodynamics_placeholder!(state::State, grid::CurvilinearGrid, 
 end
 
 
-# --- Refactored Real Data Hydrodynamics with Corrected Interpolation ---
-function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
-    ng = grid.ng
-    time_var_name = get(hydro_data.var_map, :time, "time"); time_dim_raw = ds[time_var_name][:]
-    time_dim_seconds = if eltype(time_dim_raw) <: DateTime; t0 = time_dim_raw[1]; [(dt - t0).value / 1000.0 for dt in time_dim_raw]; else; time_dim_raw; end
-    local idx1, idx2, weight; n_times = length(time_dim_seconds)
-    if time <= time_dim_seconds[1]; idx1 = 1; idx2 = 1; weight = 0.0
-    elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
-    else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
-    
-    fields_to_load = [
-        (state.u, :u, "ni_u", "nj_u", "level"),
-        (state.v, :v, "ni_v", "nj_v", "level"),
-        (state.temperature, :temp, "ni", "nj", "level"),
-        (state.salinity, :salt, "ni", "nj", "level"),
-        (state.zeta, :zeta, "ni", "nj", nothing),
-    ]
-
-    for (state_field, standard_name, x_dim, y_dim, z_dim) in fields_to_load
+# Load (and coalesce) the bracketing time-slab for `idx` into the cache, but only if it
+# isn't already cached. This is what removes the per-timestep NetCDF reads.
+function _ensure_hydro_slab!(cache::HydroSlabCache, ds::NCDataset, hydro_data::HydrodynamicData, fields, idx::Int)
+    haskey(cache.slabs, idx) && return
+    d = Dict{Symbol, Array{Float64}}()
+    for (_state_field, standard_name, has_z) in fields
         if haskey(hydro_data.var_map, standard_name)
             nc_var_name = hydro_data.var_map[standard_name]
             if haskey(ds, nc_var_name)
-                nx_phys, ny_phys = ds.dim[x_dim], ds.dim[y_dim]
-                
-                if z_dim !== nothing
-                    nz_phys = ds.dim[z_dim]
-                    interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
-                    data_slice1 = coalesce.(ds[nc_var_name][:, :, :, idx1], 0.0)
-                    if weight > 1e-9
-                        data_slice2 = coalesce.(ds[nc_var_name][:, :, :, idx2], 0.0)
-                        interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* data_slice2
-                    else
-                        interior_view .= data_slice1
-                    end
-                else
-                    interior_view_3d = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, :)
-                    data_slice1_2d = coalesce.(ds[nc_var_name][:, :, idx1], 0.0)
-                    
-                    local interpolated_data_2d
-                    if weight > 1e-9
-                        data_slice2_2d = coalesce.(ds[nc_var_name][:, :, idx2], 0.0)
-                        interpolated_data_2d = (1.0 - weight) .* data_slice1_2d .+ weight .* data_slice2_2d
-                    else
-                        interpolated_data_2d = data_slice1_2d
-                    end
-                    
-                    for k in 1:size(interior_view_3d, 3)
-                        view(interior_view_3d, :, :, k) .= interpolated_data_2d
-                    end
-                end
+                d[standard_name] = has_z ? coalesce.(ds[nc_var_name][:, :, :, idx], 0.0) :
+                                           coalesce.(ds[nc_var_name][:, :, idx], 0.0)
+            end
+        end
+    end
+    cache.slabs[idx] = d
+    return
+end
+
+# --- Real-data hydrodynamics with temporal interpolation + cached time-slabs ---
+# Numerically identical to the previous version; the only change is that the time axis is
+# converted once and the bracketing slabs are read from disk only when their time index
+# changes (then kept in hydro_data.cache), instead of being re-read every timestep.
+function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
+    ng = grid.ng
+    cache = hydro_data.cache
+
+    # Convert the time axis once, then reuse from the cache.
+    if cache.time_seconds === nothing
+        time_var_name = get(hydro_data.var_map, :time, "time")
+        time_dim_raw = ds[time_var_name][:]
+        cache.time_seconds = if eltype(time_dim_raw) <: DateTime
+            t0 = time_dim_raw[1]; [(dt - t0).value / 1000.0 for dt in time_dim_raw]
+        else
+            Float64.(time_dim_raw)
+        end
+    end
+    time_dim_seconds = cache.time_seconds
+    n_times = length(time_dim_seconds)
+
+    local idx1, idx2, weight
+    if time <= time_dim_seconds[1]; idx1 = 1; idx2 = 1; weight = 0.0
+    elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
+    else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
+
+    # (state_field, standard_name, has_z). zeta is a 2-D field broadcast across z layers.
+    fields = ((state.u, :u, true), (state.v, :v, true), (state.temperature, :temp, true),
+              (state.salinity, :salt, true), (state.zeta, :zeta, false))
+
+    # Read bracketing slabs from disk only if not already cached, then bound cache size.
+    _ensure_hydro_slab!(cache, ds, hydro_data, fields, idx1)
+    idx2 != idx1 && _ensure_hydro_slab!(cache, ds, hydro_data, fields, idx2)
+    if length(cache.slabs) > 4
+        for k in collect(keys(cache.slabs)); (k == idx1 || k == idx2) || delete!(cache.slabs, k); end
+    end
+
+    slabs1 = cache.slabs[idx1]; slabs2 = cache.slabs[idx2]
+    for (state_field, standard_name, has_z) in fields
+        haskey(slabs1, standard_name) || continue
+        data_slice1 = slabs1[standard_name]
+        if has_z
+            nx_phys, ny_phys, nz_phys = size(data_slice1)
+            interior_view = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, 1:nz_phys)
+            if weight > 1e-9
+                interior_view .= (1.0 - weight) .* data_slice1 .+ weight .* slabs2[standard_name]
             else
-                @warn "Variable '$(nc_var_name)' not found in NetCDF file for standard name :$(standard_name). Skipping."
+                interior_view .= data_slice1
+            end
+        else
+            nx_phys, ny_phys = size(data_slice1)
+            interior_view_3d = view(state_field, ng+1:nx_phys+ng, ng+1:ny_phys+ng, :)
+            interpolated_data_2d = (weight > 1e-9) ?
+                ((1.0 - weight) .* data_slice1 .+ weight .* slabs2[standard_name]) : data_slice1
+            for k in 1:size(interior_view_3d, 3)
+                view(interior_view_3d, :, :, k) .= interpolated_data_2d
             end
         end
     end

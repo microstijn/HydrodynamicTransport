@@ -2,7 +2,7 @@
 
 module ModelStructs
 
-export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, PointSource, 
+export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, HydroSlabCache, PointSource,
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
        SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster
 
@@ -118,9 +118,21 @@ end
     inflow_concentrations::Function # e.g., t -> Dict(:Salinity => 35.0, :TracerX => 0.0)
 end
 
+# In-memory cache of the bracketing hydro time-slabs, so update_hydrodynamics! does not
+# re-read the NetCDF on every timestep (only when the bracketing time index changes).
+mutable struct HydroSlabCache
+    time_seconds::Union{Nothing, Vector{Float64}}            # converted time axis, computed once
+    slabs::Dict{Int, Dict{Symbol, Array{Float64}}}          # time-index -> (field -> coalesced slab)
+end
+HydroSlabCache() = HydroSlabCache(nothing, Dict{Int, Dict{Symbol, Array{Float64}}}())
+
 struct HydrodynamicData
     filepath::String
     var_map::Dict{Symbol, String}
+    cache::HydroSlabCache
 end
+# Backward-compatible constructor (all existing 2-arg call sites get a fresh cache).
+HydrodynamicData(filepath::String, var_map::Dict{Symbol, String}) =
+    HydrodynamicData(filepath, var_map, HydroSlabCache())
 
 end # module ModelStructs

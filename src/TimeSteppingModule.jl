@@ -24,6 +24,20 @@ using JLD2
 using ..HorizontalTransportModule: advect_diffuse_tvd_implicit_x!, advect_diffuse_tvd_implicit_y!
 using ..VerticalTransportModule: advect_diffuse_tvd_implicit_z!
 
+# Copy the *mutable* dynamic fields of `src` into the preallocated `dst` (no allocation).
+# Used in place of a per-timestep deepcopy: `dst` is a reusable trial buffer that, after a
+# successful step, is swapped with `state` in O(1). Scratch buffers (_buffer1/_buffer2,
+# flux_x/y/z) are intentionally not copied — they are overwritten before being read each step.
+function _copy_dynamic_state!(dst::State, src::State)
+    for (k, v) in src.tracers; copyto!(dst.tracers[k], v); end
+    copyto!(dst.u, src.u); copyto!(dst.v, src.v); copyto!(dst.w, src.w); copyto!(dst.zeta, src.zeta)
+    copyto!(dst.temperature, src.temperature); copyto!(dst.salinity, src.salinity)
+    copyto!(dst.tss, src.tss); copyto!(dst.uvb, src.uvb)
+    for (k, v) in src.bed_mass; copyto!(dst.bed_mass[k], v); end
+    dst.time = src.time
+    return dst
+end
+
 """
     run_simulation(grid, initial_state, sources, start_time, end_time, dt; ...)
 
@@ -70,6 +84,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     end
 
     state = deepcopy(state_to_run)
+    work = deepcopy(state)            # reusable trial buffer (replaces per-step deepcopy)
     time = effective_start_time
     current_dt = dt
 
@@ -118,49 +133,52 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
         step_successful = false
         while !step_successful
-            state_backup = deepcopy(state)
-            oysters_backup = deepcopy(virtual_oysters)
+            # Snapshot the committed state into the reusable trial buffer (no allocation),
+            # then run the trial step in-place on `work`. A rejected step simply re-copies
+            # from `state` on the next iteration; a successful step commits via an O(1) swap.
+            _copy_dynamic_state!(work, state)
+            oysters_backup = deepcopy(virtual_oysters)   # cheap (empty for kernel runs)
 
-            apply_boundary_conditions!(state_backup, grid, boundary_conditions)
-            
-            # Hydrodynamics Step 
+            apply_boundary_conditions!(work, grid, boundary_conditions)
+
+            # Hydrodynamics Step
             if ds !== nothing && hydro_data !== nothing
-                update_hydrodynamics!(state_backup, grid, ds, hydro_data, time + trial_dt)
+                update_hydrodynamics!(work, grid, ds, hydro_data, time + trial_dt)
             else
-                update_hydrodynamics_placeholder!(state_backup, grid, time + trial_dt)
+                update_hydrodynamics_placeholder!(work, grid, time + trial_dt)
             end
 
-            # Transport Step 
+            # Transport Step
             if advection_scheme == :ImplicitADI_3D
-                for tracer_name in keys(state_backup.tracers)
-                    C_initial = state_backup.tracers[tracer_name]
-                    C_buffer1 = state_backup._buffer1[tracer_name]
-                    C_buffer2 = state_backup._buffer2[tracer_name]
+                for tracer_name in keys(work.tracers)
+                    C_initial = work.tracers[tracer_name]
+                    C_buffer1 = work._buffer1[tracer_name]
+                    C_buffer2 = work._buffer2[tracer_name]
 
-                    advect_diffuse_tvd_implicit_x!(C_buffer1, C_initial, state_backup, grid, trial_dt, Kh, limiter_func)
-                    advect_diffuse_tvd_implicit_y!(C_buffer2, C_buffer1, state_backup, grid, trial_dt, Kh, limiter_func)
-                    advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, state_backup, grid, trial_dt, Kz, limiter_func)
+                    advect_diffuse_tvd_implicit_x!(C_buffer1, C_initial, work, grid, trial_dt, Kh, limiter_func)
+                    advect_diffuse_tvd_implicit_y!(C_buffer2, C_buffer1, work, grid, trial_dt, Kh, limiter_func)
+                    advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, work, grid, trial_dt, Kz, limiter_func)
                 end
             else
-                horizontal_transport!(state_backup, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
-                vertical_transport!(state_backup, grid, trial_dt)
+                horizontal_transport!(work, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
+                vertical_transport!(work, grid, trial_dt)
             end
-            
+
             # --- Physics Steps ---
-            deposition = apply_settling!(state_backup, grid, trial_dt, sediment_params)
-            bed_exchange!(state_backup, grid, trial_dt, deposition, sediment_params)
-            source_sink_terms!(state_backup, grid, sources, functional_interactions, time + trial_dt, trial_dt, D_crit)
+            deposition = apply_settling!(work, grid, trial_dt, sediment_params)
+            bed_exchange!(work, grid, trial_dt, deposition, sediment_params)
+            source_sink_terms!(work, grid, sources, functional_interactions, time + trial_dt, trial_dt, D_crit)
             if !isempty(oysters_backup)
-                update_oysters!(state_backup, grid, oysters_backup, trial_dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+                update_oysters!(work, grid, oysters_backup, trial_dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
             end
-            
+
             # --- Timestep Validation ---
-            cfl_actual = calculate_max_cfl_term(state_backup, grid) * trial_dt
-            
+            cfl_actual = calculate_max_cfl_term(work, grid) * trial_dt
+
             if use_adaptive_dt && cfl_actual > cfl_max
                 trial_dt = max(dt_min, trial_dt * 0.9 * cfl_max / (cfl_actual + 1e-9))
             else
-                state = state_backup
+                state, work = work, state    # O(1) commit; old `state` becomes the next trial buffer
                 virtual_oysters = oysters_backup
                 step_successful = true
 

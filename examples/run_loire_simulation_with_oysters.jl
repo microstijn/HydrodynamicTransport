@@ -1,8 +1,12 @@
-# run_loire_simulation.jl
+# examples/run_loire_simulation_with_oysters.jl
+#
+# End-to-end real-data example: dissolved/sorbed virus transport in the Loire estuary
+# with adsorption-desorption, sediment settling of the sorbed phase, temperature/UVB
+# decay, and virtual oyster uptake. Requires a local MARS3D NetCDF file (set the path
+# in `loire_filepath` below) and is therefore not run by the automated test suite.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
-using Revise
 using HydrodynamicTransport
 using HydrodynamicTransport.FluxLimitersModule
 using NCDatasets

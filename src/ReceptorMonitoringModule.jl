@@ -196,8 +196,8 @@ function flush_receptor_monitor!(monitor::ReceptorMonitor)
         end
 
         for row in monitor.buffer
-            values = map(v -> v isa String ? "\"$v\"" : string(v), values(row))
-            write(io, join(values, ","))
+            row_values = map(v -> v isa String ? "\"$v\"" : string(v), values(row))
+            write(io, join(row_values, ","))
             write(io, "\n")
         end
     end

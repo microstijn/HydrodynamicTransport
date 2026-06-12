@@ -80,16 +80,31 @@ Cartesian/placeholder grid does NOT exercise #1 at all.
    already precomputed grid data; the main shared per-step cost — the velocity field — is now
    cached by #1).
 
-## Roadmap — cleanup ("clean it up")
+## Cleanup — done (committed on `previr`)
 
-- **Broken test suite:** `TestCasesModule.jl` uses a stale API (`state._buffers`, positional
-  `run_simulation(grid, state, sources, ds, hydro_data, …)`, 3-arg `horizontal_transport!`),
-  and `run_braided_river_test.jl` (referenced by it and `test/runtests.jl`) is **missing** —
-  restore or remove. Make `test/runtests.jl` pass under the softMode env.
-- **Fix HT's own `Project.toml`/`Manifest.toml`** so the package precompiles standalone under
-  Julia 1.14 nightly (currently must be run via softMode's env).
-- Remove the `repomix-output*.xml` source dumps from the repo root.
-- Apply #2 to `run_and_store_simulation`, or document that it's unused.
+- **Test suite rewritten.** `test/runtests.jl` is now a single self-contained suite (synthetic
+  in-memory grids + tiny NetCDF fixtures, no external data/network) covering the current API:
+  flux limiters, `lonlat_to_ij`, state init, grid geometry, curvilinear-from-NetCDF + autodetect,
+  hydro interpolation **+ slab cache (#1)**, vector rotation, Cartesian mass bounds, end-to-end
+  curvilinear `:TVD`/`:UP3` runs, adaptive `dt`, source/sink + decay, sediment settling/bed
+  exchange, and receptor monitoring. **81 tests pass** via `julia +release` (1.12) `Pkg.test()`.
+  The stale `TestCasesModule.jl` and the never-existed `run_braided_river_test.jl` dependency are
+  gone.
+- **src/ is library-only.** Removed the 7 stale dev scripts; moved
+  `run_loire_simulation_with_oysters.jl` → `examples/`. Removed the dead `ext/CairoMakieExt.jl`
+  (was never wired into `[weakdeps]`/`[extensions]`).
+- **Deps pruned.** Dropped `Revise`, `BenchmarkTools`, `UnicodePlots` (only the deleted scripts
+  used them); moved `Test` to `[extras]`/`[targets]`. Package precompiles cleanly under 1.12.
+- **Repo hygiene.** Removed all `repomix-output*.xml` dumps; rewrote the incoherent `.gitignore`.
+- **Bug fixed.** `flush_receptor_monitor!` shadowed `Base.values` with a local of the same name,
+  so every CSV flush threw `UndefVarError` — fixed; now exercised by the receptor testset.
+
+## Roadmap — cleanup (remaining)
+
+- **Standalone precompile under Julia 1.14 nightly** still fails (LibCURL / Downloads / Pkg) — a
+  nightly-specific issue, unchanged by the above. The package precompiles + tests cleanly under
+  1.12 release; nightly runs continue via the softMode env.
+- Apply #2 (no per-step `deepcopy`) to `run_and_store_simulation`, or document that it's unused.
 - Memory: the `work` buffer ~doubles the resident `State` (same *peak* as before, now
   persistent) — fine for a workstation; revisit if RAM-bound on the full 20-tracer grid.
 

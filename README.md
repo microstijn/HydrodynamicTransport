@@ -5,16 +5,19 @@
 ## Features
 
 *   **Grid Support**: Works with both `CartesianGrid` and curvilinear `CurvilinearGrid` systems.
-*   **Advection Schemes**: Implements multiple horizontal advection schemes, including a high-order, Total Variation Diminishing (TVD) scheme based on Bott (1989) and a simpler 3rd-Order Upstream (UP3) scheme.
+*   **Advection Schemes**: Implements multiple horizontal advection schemes, including a high-order, Total Variation Diminishing (TVD) scheme based on Bott (1989), a simpler 3rd-Order Upstream (UP3) scheme, and an implicit ADI scheme (`:ImplicitADI_3D`).
 *   **Stable Vertical Transport**: Uses an explicit first-order upwind scheme for vertical advection and a numerically stable implicit Crank-Nicolson scheme for vertical diffusion.
 *   **Flexible Boundary Conditions**: Supports `OpenBoundary`, `RiverBoundary`, and `TidalBoundary` types to handle various inflow/outflow scenarios.
+*   **Adaptive Time-Stepping**: Optional CFL-driven adaptive `dt` (`use_adaptive_dt=true`) with configurable bounds.
+*   **Reactive Processes**: First-order tracer decay and arbitrary multi-tracer reactions via `FunctionalInteraction`, cohesive sediment settling/erosion (`SedimentParams`), and virtual filter-feeder uptake (`VirtualOyster`).
+*   **Receptor Monitoring**: Write high-frequency point time series (`ReceptorMonitor`) without dumping the full grid state.
 *   **Utilities**: Includes helper functions to initialize grids from NetCDF files, estimate stable timesteps (CFL condition), and automatically map variables from data files.
 
 ## Getting Started
 
 ### Prerequisites
 
-*   [Julia](https://julialang.org/downloads/) (Version 1.6 or later recommended)
+*   [Julia](https://julialang.org/downloads/) 1.11 or later (developed and tested on 1.12).
 
 ### Installation
 
@@ -70,9 +73,71 @@ final_state = run_simulation(
 println("Simulation complete. Final time: \$(final_state.time) seconds.")
 ```
 
+## Working with Real Hydrodynamic Data
+
+For real simulations the grid and the velocity/environmental forcing come from a NetCDF file
+(e.g. a ROMS or MARS3D history file). The package can auto-detect the grid geometry and the
+relevant variables:
+
+```julia
+using HydrodynamicTransport
+using NCDatasets
+
+filepath = "path/to/hydro_history.nc"
+
+# Build the curvilinear grid and auto-map variables (u, v, temp, salt, time, ...).
+grid       = initialize_curvilinear_grid(filepath)
+hydro_data = create_hydrodynamic_data_from_file(filepath)
+
+# Open the dataset and initialize the state for one tracer.
+ds    = NCDataset(filepath)
+state = initialize_state(grid, ds, (:Tracer,))
+
+# Recommend a stable timestep from the CFL condition.
+dt = estimate_stable_timestep(hydro_data; advection_scheme=:TVD)
+
+# Place a source at a geographic location.
+i, j    = lonlat_to_ij(grid, -1.55, 47.2)
+sources = [PointSource(i=i, j=j, k=grid.nz, tracer_name=:Tracer, influx_rate=(t)->1.0e6)]
+
+final_state = run_simulation(
+    grid, state, sources, 0.0, 24*3600.0, dt;
+    ds = ds, hydro_data = hydro_data,
+    boundary_conditions = [OpenBoundary(side=:East), OpenBoundary(side=:West)],
+    advection_scheme = :TVD,
+)
+close(ds)
+```
+
+See [`examples/run_loire_simulation_with_oysters.jl`](examples/run_loire_simulation_with_oysters.jl)
+for a full real-data run combining sources, adsorption/desorption, sediment settling, decay,
+and virtual oysters.
+
+## Advanced Features
+
+These are all passed as keyword arguments to `run_simulation` (see the source for the full list):
+
+*   **Adaptive time-stepping**: `use_adaptive_dt=true` with `cfl_max`, `dt_max`, `dt_min`,
+    and `dt_growth_factor` lets the solver grow/shrink `dt` to stay within the CFL limit.
+*   **Reactions** (`functional_interactions`): supply a `Vector{FunctionalInteraction}`. Each
+    interaction's function receives `(concentrations, environment, dt)` — where `environment`
+    exposes `T`, `S`, `TSS`, `UVB`, and `depth` — and returns a `Dict` of per-tracer changes.
+*   **Sediment** (`sediment_params`): a `Dict{Symbol, SedimentParams}` enables settling and
+    bed erosion/deposition for the listed tracers (initialize the state with
+    `sediment_tracers=[...]` so the bed-mass field exists).
+*   **Virtual oysters** (`virtual_oysters`, `oyster_tracers`): place `VirtualOyster` filter
+    feeders that remove dissolved/sorbed tracers from their cell.
+*   **Receptor monitoring** (`receptor_monitors`, `receptor_monitor_interval`): write per-point
+    CSV time series with `ReceptorMonitor` (or `create_receptor_monitor_from_lonlat`), optionally
+    with `write_full_state=false` to skip full-grid output. See
+    [`examples/example_receptor_monitor.jl`](examples/example_receptor_monitor.jl).
+*   **Checkpoint / restart**: `output_dir` + `output_interval` write `.jld2` snapshots;
+    `restart_from="state_t_….jld2"` resumes from one.
+
 ## Running the Tests
 
-The package includes a test suite to verify its core functionality. To run the tests, activate the project environment and use the `test` command in the Julia package manager:
+The package ships a self-contained test suite (synthetic in-memory grids and NetCDF fixtures —
+no external data or network access required). Run it with the Julia package manager:
 
 ```julia
 julia> ]

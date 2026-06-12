@@ -1,20 +1,19 @@
+# Repomix source dumps
+repomix-output*.xml
+.repomix/
+
+# Large local input data (not distributed with the repo)
 data/ROMS_example.nc
-repomix-output.xml
-src/curvi_phase1_test.jl
-src/phase2_boundaries.jl
-src/curvi_phase2_difussion.jl
-src/curvi_phase2_advection_test.jl
-.gitignore
-.repomix/bundles.json
-src/speed_comparison_TVD_UP3.jl
-src/scheme_comparison_test.jl
-src/test_hydrodynamics_interpolation.jl
-test/test_integration_NEW.jl
-test/test_utils.jl
-.gitignore
-test/runtests.jl
-repomix-output.xmladi.xml
-src/wt_dry_verification.jl
-repomix-output.xmladd_sins.xml
-repomix-output.xmlsediment_implicit.xml
-repomix-output.xmlfluxlimiting.xml
+
+# Simulation outputs / checkpoints
+*.jld2
+
+# Editor / OS cruft
+*.swp
+.DS_Store
+Thumbs.db
+
+# Julia build artifacts
+/docs/build/
+*.cov
+*.jl.mem

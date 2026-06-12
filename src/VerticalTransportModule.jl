@@ -67,12 +67,40 @@ function solve_implicit_diffusion_column!(
 end
 
 
-# --- Main transport function (Multithreaded) ---
+# --- Uniform Crank-Nicolson vertical-diffusion operator (CurvilinearGrid) ---
+# grid.z_w is spatially uniform, so the implicit operator A and the explicit operator B are
+# identical for every water column. Build them once and factorize A once, then reuse the
+# factorization across all columns. Numerically identical to the per-column `A \ (B*C)` path
+# (same A, same B, same LU), but without rebuilding/re-factorizing per column.
+function _build_cn_diffusion_operator(grid::CurvilinearGrid, dt::Float64, Kz::Float64)
+    @inbounds dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
+    alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
+
+    lower_A = -alpha[2:end]; main_A = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
+    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
+    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
+    A = Tridiagonal(lower_A, main_A, upper_A)
+
+    lower_B = alpha[2:end]; main_B = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
+    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
+    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
+    B = Tridiagonal(lower_B, main_B, upper_B)
+
+    return lu(A), B
+end
+
+# --- Main transport function (Multithreaded over columns) ---
 function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Kz = 1e-4
     ng = grid.ng
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     if nz <= 1; return; end
+
+    # Curvilinear diffusion operator is column-independent -> build + factorize once per call.
+    local F_diff, B_diff
+    if isa(grid, CurvilinearGrid)
+        F_diff, B_diff = _build_cn_diffusion_operator(grid, dt, Kz)
+    end
 
     for tracer_name in keys(state.tracers)
         C_final = state.tracers[tracer_name]
@@ -84,16 +112,16 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
             @inbounds for i_phys in 1:nx
                 i_glob, j_glob = i_phys + ng, j_phys + ng
 
-                C_col_in = C_final[i_glob, j_glob, :]
+                C_col_in = view(C_final, i_glob, j_glob, :)
                 C_col_out = view(C_buffer, i_glob, j_glob, :)
-                
+
                 flux_z_col = view(state.flux_z, i_glob, j_glob, :)
                 flux_z_col .= 0.0
 
                 for k in 2:nz
                     velocity = state.w[i_glob, j_glob, k]
                     concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
-                    
+
                     face_area = if isa(grid, CartesianGrid)
                         grid.face_area_z[i_glob, j_glob, k]
                     else # CurvilinearGrid
@@ -115,15 +143,26 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
         end
 
         # --- 2. Diffusion Step ---
-        # This loop is also parallelized, as each column's implicit solve is independent.
-        Threads.@threads for j_phys in 1:ny
-            @inbounds for i_phys in 1:nx
-                i_glob, j_glob = i_phys + ng, j_phys + ng
-
-                C_col_in = C_buffer[i_glob, j_glob, :]
-                C_col_out = view(C_final, i_glob, j_glob, :)
-                
-                solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+        # Each column's implicit solve is independent -> parallelized over columns.
+        if isa(grid, CurvilinearGrid)
+            Threads.@threads for j_phys in 1:ny
+                rhs = Vector{Float64}(undef, nz)   # task-local scratch (no threadid indexing)
+                @inbounds for i_phys in 1:nx
+                    i_glob, j_glob = i_phys + ng, j_phys + ng
+                    C_col_in = view(C_buffer, i_glob, j_glob, :)
+                    mul!(rhs, B_diff, C_col_in)   # rhs = B * C
+                    ldiv!(F_diff, rhs)            # solve A * x = rhs in place (reuses factorization)
+                    view(C_final, i_glob, j_glob, :) .= rhs
+                end
+            end
+        else
+            Threads.@threads for j_phys in 1:ny
+                @inbounds for i_phys in 1:nx
+                    i_glob, j_glob = i_phys + ng, j_phys + ng
+                    C_col_in = view(C_buffer, i_glob, j_glob, :)
+                    C_col_out = view(C_final, i_glob, j_glob, :)
+                    solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+                end
             end
         end
     end

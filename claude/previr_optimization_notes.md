@@ -80,31 +80,39 @@ Cartesian/placeholder grid does NOT exercise #1 at all.
 
 ---
 
+### #4 — Tracer-level threading  *(bit-identical)*
+Transport now threads over the (independent) **tracers** instead of inside each tracer:
+`horizontal_transport!` and `vertical_transport!` run a `Threads.@threads` loop over tracer
+chunks, each task using its own scratch flux buffers. Horizontal uses lazily-allocated
+per-task flux pools on `State` (`flux_x_pool`/`flux_y_pool`, scratch → not copied in
+`_copy_dynamic_state!`); vertical uses tiny per-task column scratch. The inner TVD advection /
+diffusion kernels are now serial (`:ImplicitADI` keeps its own internal threading and stays on
+the serial-tracer path).
+
+**Measured (real grid, 20 tracers, 8 threads):** transport **740 → 618 ms/step (1.2×)** over
+#3. Only ~1.2× — not the ~2× hoped — because the transport is **memory-bandwidth-bound** at 8
+threads (the kernels stream large arrays; fewer barriers + better balance help, but the memory
+wall dominates). Bit-identical; 81/81 tests pass. Cumulative transport speedup vs the original
+baseline: **~2568 → ~618 ms/step (4.2×)**.
+
+*Caveat:* adding fields to `State` means restarting from a `.jld2` checkpoint written by an
+*older* struct may fail (regenerate checkpoints). `run_and_store_simulation` still `deepcopy`s
+the whole `State` per step, which now also copies the flux pools — another reason to migrate it
+off `deepcopy` (or leave it; it's not on the campaign path).
+
 ## Roadmap — speed-ups (priority order)
 
-1. **Tracer-level threading (the remaining big transport lever).** Transport currently
-   threads *inside* each tracer: `horizontal_transport!` over vertical layers (`k`, only ~10)
-   and `vertical_transport!` over columns (`j`, ~252). Vertical scales well (~3.6×); horizontal
-   scales poorly (~2×) because `k=10 < cores` and each step issues ~160 `@threads` barriers
-   (8 per tracer × 20). Threading the **tracer loop instead** (each of the 20 independent
-   tracers on its own core, single-threaded internally) would balance better, cut barriers to
-   one per step, and keep cache locality. Bit-identical (tracers are independent).
-   **Cost/tradeoffs to weigh first:** needs **persistent per-thread flux buffers** — either new
-   scratch fields on `State` (clean; mirror how `flux_x/y/z` are skipped in
-   `_copy_dynamic_state!`) or a preallocated pool, *not* per-step `similar(...)* (≈160 MB/step →
-   GC-bound). Also regresses low-tracer runs (e.g. the 2-tracer `validate_optim`) to ~2-way
-   parallel; the campaign (20 tracers) is the target so this is acceptable. Estimated ≈2× more
-   on transport (→ ~7× vs the original baseline).
-2. **Diagnose what limits `dt`** before touching the CFL barrier. Instrument
+1. **`dt` is the next lever, not threading.** Transport is memory-bandwidth-bound, so further
+   thread work won't help much. **Diagnose what limits `dt`** before touching the CFL barrier. Instrument
    `calculate_max_cfl_term` to report the *binding* cell/term. `dt_min=0.01` in the campaign
    smells like a few pathological thin / wetting-drying fringe cells, not the whole field — if
    so, **local subcycling** or capping velocity in sub-`D_crit`/thin cells recovers a large
    global `dt` cheaply and safely.
-3. **Implicit vertical diffusion only** (if `Kz` / thin surface layers are the stiff term):
+2. **Implicit vertical diffusion only** (if `Kz` / thin surface layers are the stiff term):
    a linear tridiagonal solve in `z`, unconditionally stable, well-posed. **Do NOT** revive
    implicit-TVD advection — it's nonlinear (limiter depends on the solution) and was already
    found unstable.
-4. Reuse work across tracers within a step where geometry is shared (face areas/volumes are
+3. Reuse work across tracers within a step where geometry is shared (face areas/volumes are
    already precomputed grid data; the main shared per-step cost — the velocity field — is now
    cached by #1).
 

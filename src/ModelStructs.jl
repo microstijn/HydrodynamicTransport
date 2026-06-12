@@ -44,6 +44,10 @@ mutable struct State
     flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
     flux_y::Array{Float64, 3} # Pre-allocated buffer for y-direction fluxes
     flux_z::Array{Float64, 3} # Pre-allocated buffer for z-direction fluxes
+    # Per-task scratch flux buffers for tracer-parallel horizontal transport. Lazily filled
+    # (one set per parallel chunk) on first use; reused across steps. Scratch only -> not copied.
+    flux_x_pool::Vector{Array{Float64, 3}}
+    flux_y_pool::Vector{Array{Float64, 3}}
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
     time::Float64

@@ -36,37 +36,70 @@ The specific advection algorithm is chosen via the `scheme` argument.
 # Returns
 - `nothing`: The function modifies `state.tracers` in-place.
 """
-function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
-    Kh = 1.0 
-    for tracer_name in keys(state.tracers)
-        C_initial = state.tracers[tracer_name]
-        C_intermediate = state._buffer1[tracer_name] # Re-using buffer
-        
-        # --- Advection Step ---
-        if scheme == :TVD
-            advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
-            advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
-        elseif scheme == :UP3
-            advect_x_up3!(C_intermediate, C_initial, state, grid, dt, state.flux_x, D_crit)
-            advect_y_up3!(C_initial, C_intermediate, state, grid, dt, state.flux_y, D_crit)
-        elseif scheme == :ImplicitADI
-            # Step 1: Implicit X-Sweep: (I - dt*L_x) * C_intermediate = C_initial
-            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
-
-            # Step 1.5: Handle Boundary Conditions for the Intermediate Variable
-            apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
-
-            # Step 2: Implicit Y-Sweep: (I - dt*L_y) * C_final = C_intermediate
-            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt) # Result stored back in C_initial
-        else
-            error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
+# Lazily allocate `n` per-task scratch flux-buffer sets (one per parallel chunk), reused
+# across steps. Called single-threaded before the parallel tracer loop.
+function _ensure_flux_pools!(state::State, n::Int)
+    if length(state.flux_x_pool) != n || (n > 0 && size(state.flux_x_pool[1]) != size(state.flux_x))
+        resize!(state.flux_x_pool, n)
+        resize!(state.flux_y_pool, n)
+        for i in 1:n
+            state.flux_x_pool[i] = zeros(size(state.flux_x))
+            state.flux_y_pool[i] = zeros(size(state.flux_y))
         end
-        
-        # --- Diffusion Step (common to all schemes) ---
-        # The result of advection is in C_initial (now C_final_advection)
-        # We use C_intermediate as the buffer again.
-        diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, state.flux_x, D_crit)
-        diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, state.flux_y, D_crit)
+    end
+    return nothing
+end
+
+function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
+    Kh = 1.0
+    if scheme == :TVD || scheme == :UP3
+        # Tracers are independent -> parallelize over them (one tracer per core, each with its
+        # own scratch flux buffers). The per-tracer kernels run serially, which keeps cache
+        # locality and issues a single thread barrier per step. Bit-identical to the serial loop.
+        tracer_names = collect(keys(state.tracers))
+        ntr = length(tracer_names)
+        nchunks = max(1, min(Threads.nthreads(), ntr))
+        _ensure_flux_pools!(state, nchunks)
+
+        Threads.@threads for cid in 1:nchunks
+            fx = state.flux_x_pool[cid]
+            fy = state.flux_y_pool[cid]
+            ti = cid
+            while ti <= ntr
+                tracer_name = tracer_names[ti]
+                C_initial = state.tracers[tracer_name]
+                C_intermediate = state._buffer1[tracer_name]
+
+                if scheme == :TVD
+                    advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
+                    advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                else
+                    advect_x_up3!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
+                    advect_y_up3!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                end
+
+                # --- Diffusion Step ---
+                diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, fx, D_crit)
+                diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, fy, D_crit)
+
+                ti += nchunks
+            end
+        end
+    elseif scheme == :ImplicitADI
+        # Implicit ADI keeps its own internal threading -> run the tracer loop serially.
+        for tracer_name in keys(state.tracers)
+            C_initial = state.tracers[tracer_name]
+            C_intermediate = state._buffer1[tracer_name]
+
+            advect_implicit_x!(C_intermediate, C_initial, state, grid, dt)
+            apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
+            advect_implicit_y!(C_initial, C_intermediate, state, grid, dt)
+
+            diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, state.flux_x, D_crit)
+            diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, state.flux_y, D_crit)
+        end
+    else
+        error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
     end
     return nothing
 end
@@ -302,9 +335,8 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     u = state.u
     fluxes_x .= 0.0
 
-    # By adding Threads.@threads here, Julia will automatically and safely
-    # distribute the iterations of the k loop among the available threads.
-    Threads.@threads for k in axes(C_in, 3)
+    # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
+    @inbounds for k in axes(C_in, 3)
         for j_phys in 1:ny
             j_glob = j_phys + ng
             # --- Interior Faces ---
@@ -368,8 +400,7 @@ function advect_x_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
         end
     end
 
-    # This loop is also safe to parallelize for the same reasons.
-    Threads.@threads for k in axes(C_out, 3)
+    @inbounds for k in axes(C_out, 3)
         for j_phys in 1:ny
             for i_phys in 1:nx
                 i_glob, j_glob = i_phys + ng, j_phys + ng
@@ -386,8 +417,8 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
     v = state.v
     fluxes_y .= 0.0
 
-    # Here, we parallelize the loop over the vertical layers.
-    Threads.@threads for k in axes(C_in, 3)
+    # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
+    @inbounds for k in axes(C_in, 3)
         for i_phys in 1:nx
             i_glob = i_phys + ng
             # --- Interior Faces ---
@@ -451,7 +482,7 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
         end
     end
 
-    Threads.@threads for k in axes(C_out, 3)
+    @inbounds for k in axes(C_out, 3)
         for j_phys in 1:ny
             for i_phys in 1:nx
                 i_glob, j_glob = i_phys + ng, j_phys + ng
@@ -601,9 +632,9 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     fluxes_x .= 0.0
 
     # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
-    # Parallelized over vertical layers (each layer writes a disjoint slice of fluxes_x).
-    Threads.@threads for k in axes(C_in, 3)
-        @inbounds for j_phys in 1:ny, i_phys in 2:nx
+    # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
+    @inbounds for k in axes(C_in, 3)
+        for j_phys in 1:ny, i_phys in 2:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
             local flux = 0.0
@@ -629,8 +660,8 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
         end
     end
 
-    Threads.@threads for k in axes(C_out, 3)
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+    @inbounds for k in axes(C_out, 3)
+        for j_phys in 1:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
             flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
             C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
@@ -644,9 +675,9 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     fluxes_y .= 0.0
 
     # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
-    # Parallelized over vertical layers (each layer writes a disjoint slice of fluxes_y).
-    Threads.@threads for k in axes(C_in, 3)
-        @inbounds for j_phys in 2:ny, i_phys in 1:nx
+    # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
+    @inbounds for k in axes(C_in, 3)
+        for j_phys in 2:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
             local flux = 0.0
@@ -672,8 +703,8 @@ function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
         end
     end
 
-    Threads.@threads for k in axes(C_out, 3)
-        @inbounds for j_phys in 1:ny, i_phys in 1:nx
+    @inbounds for k in axes(C_out, 3)
+        for j_phys in 1:ny, i_phys in 1:nx
             i_glob, j_glob = i_phys + ng, j_phys + ng
             flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
             C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence

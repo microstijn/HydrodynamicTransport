@@ -32,6 +32,26 @@ bracket index changes**, kept in a new `HydroSlabCache` on `HydrodynamicData`
 (`ModelStructs.jl`, `Hydrodynamics.jl`). The 2-arg `HydrodynamicData(filepath, var_map)`
 constructor is preserved, so all existing call sites are untouched.
 
+### #3 — Vertical CN diffusion: factorize once per call  *(bit-identical)*
+`vertical_transport!` rebuilt and **re-factorized an identical tridiagonal Crank-Nicolson
+operator** (`A \ rhs`) for *every* water column, *every* tracer, *every* step. On the
+curvilinear grid `grid.z_w` is spatially uniform → the operator is column-independent. Now
+`B` and `lu(A)` are built **once per call** and reused across all columns via `mul!`/`ldiv!`,
+and the per-column slice-copies were replaced with views (`VerticalTransportModule.jl`).
+Numerically identical (same `A`, same `B`, same LU path). Also threaded the previously-serial
+`diffuse_x!`/`diffuse_y!` over vertical layers and removed boundary-face array-literal
+allocations in the TVD advection (`HorizontalTransportModule.jl`).
+
+**Measured on the real CurviLoire grid (467×252×10), 20 tracers, 8 threads:**
+`vertical_transport!` **1993 → 218 ms/step (9.1×)** — the original actually *slowed down* with
+threads because per-column allocation caused GC contention; the factorize-once version scales.
+Total transport (`horizontal_transport!` + `vertical_transport!`) **~2568 → ~731 ms/step (3.5×)**.
+`validate_optim.jl` checksum unchanged; 81/81 tests pass. (Committed: `adbe669`.)
+
+*Tried and reverted:* rebalancing the horizontal threading from layers (`k`, ~10) to rows
+(`j`/`i`, ~hundreds) made it ~2× **worse** — arrays are column-major so a `k`-layer is one
+contiguous block; threading over `k` keeps each thread on a contiguous slab.
+
 ### #2 — No per-step `deepcopy`  *(bit-identical)*
 `run_simulation` snapshotted the **entire multi-tracer state** with `deepcopy(state)` every
 timestep (and every CFL retry) purely to enable adaptive-dt rollback — huge per-step
@@ -62,11 +82,19 @@ Cartesian/placeholder grid does NOT exercise #1 at all.
 
 ## Roadmap — speed-ups (priority order)
 
-1. **Thread the tracer loop (#4).** The 20 passive tracers are advected serially in
-   `horizontal_transport!` / `vertical_transport!` (`for tracer_name in keys(state.tracers)`).
-   They're independent → `Threads.@threads` over tracers gives ~cores× on the transport step.
-   Needs **per-thread flux buffers** (currently shared `state.flux_x/flux_y/flux_z`). Safe /
-   bit-identical (watch FP reduction order in diffusion).
+1. **Tracer-level threading (the remaining big transport lever).** Transport currently
+   threads *inside* each tracer: `horizontal_transport!` over vertical layers (`k`, only ~10)
+   and `vertical_transport!` over columns (`j`, ~252). Vertical scales well (~3.6×); horizontal
+   scales poorly (~2×) because `k=10 < cores` and each step issues ~160 `@threads` barriers
+   (8 per tracer × 20). Threading the **tracer loop instead** (each of the 20 independent
+   tracers on its own core, single-threaded internally) would balance better, cut barriers to
+   one per step, and keep cache locality. Bit-identical (tracers are independent).
+   **Cost/tradeoffs to weigh first:** needs **persistent per-thread flux buffers** — either new
+   scratch fields on `State` (clean; mirror how `flux_x/y/z` are skipped in
+   `_copy_dynamic_state!`) or a preallocated pool, *not* per-step `similar(...)* (≈160 MB/step →
+   GC-bound). Also regresses low-tracer runs (e.g. the 2-tracer `validate_optim`) to ~2-way
+   parallel; the campaign (20 tracers) is the target so this is acceptable. Estimated ≈2× more
+   on transport (→ ~7× vs the original baseline).
 2. **Diagnose what limits `dt`** before touching the CFL barrier. Instrument
    `calculate_max_cfl_term` to report the *binding* cell/term. `dt_min=0.01` in the campaign
    smells like a few pathological thin / wetting-drying fringe cells, not the whole field — if

@@ -59,7 +59,11 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
         tracer_names = collect(keys(state.tracers))
         ntr = length(tracer_names)
         nchunks = max(1, min(Threads.nthreads(), ntr))
-        _ensure_flux_pools!(state, nchunks)
+        # TVD/UP3 advection uses the per-task flux pools; their diffusion and ALL of FFSL
+        # (advection + diffusion) use per-line scratch -> FFSL needs no flux pools at all.
+        if scheme == :TVD || scheme == :UP3
+            _ensure_flux_pools!(state, nchunks)
+        end
 
         # FFSL: the face Courant is tracer-independent -> compute it once here (into the unused
         # state.flux_x/flux_y scratch) instead of repeating it inside every tracer's sweep.
@@ -68,28 +72,30 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
         end
 
         Threads.@threads for cid in 1:nchunks
-            fx = state.flux_x_pool[cid]
-            fy = state.flux_y_pool[cid]
             ti = cid
             while ti <= ntr
                 tracer_name = tracer_names[ti]
                 C_initial = state.tracers[tracer_name]
                 C_intermediate = state._buffer1[tracer_name]
 
-                if scheme == :TVD
-                    advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
-                    advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
-                elseif scheme == :FFSL
+                if scheme == :FFSL
                     advect_x_ffsl!(C_intermediate, C_initial, state, grid, dt, D_crit)
                     advect_y_ffsl!(C_initial, C_intermediate, state, grid, dt, D_crit)
                 else
-                    advect_x_up3!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
-                    advect_y_up3!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                    fx = state.flux_x_pool[cid]
+                    fy = state.flux_y_pool[cid]
+                    if scheme == :TVD
+                        advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
+                        advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                    else
+                        advect_x_up3!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
+                        advect_y_up3!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                    end
                 end
 
-                # --- Diffusion Step ---
-                diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, fx, D_crit)
-                diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, fy, D_crit)
+                # --- Diffusion Step (per-line scratch; no flux buffer) ---
+                diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, D_crit)
+                diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, D_crit)
 
                 ti += nchunks
             end
@@ -104,8 +110,8 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
             apply_intermediate_boundary_conditions!(C_intermediate, C_initial, grid, boundary_conditions, tracer_name)
             advect_implicit_y!(C_initial, C_intermediate, state, grid, dt)
 
-            diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, state.flux_x, D_crit)
-            diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, state.flux_y, D_crit)
+            diffuse_x!(C_intermediate, C_initial, state, grid, dt, Kh, D_crit)
+            diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, D_crit)
         end
     else
         error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
@@ -853,11 +859,10 @@ enforced at land boundaries by checking the grid mask.
 # Returns
 - `nothing`: Modifies `C_out` in-place.
 """
-# `fluxes_x` is retained for signature compatibility (TVD/UP3/ADI callers pass a pool buffer)
-# but is UNUSED: the diffusive x-flux is computed in a per-row Float64 scratch vector and consumed
-# immediately by the divergence, avoiding the full-array zero/write/read-back of a 3-D flux buffer
-# (~3 extra 4.7 MB passes/tracer). Numerically bit-identical to the buffer version.
-function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_x, D_crit::Float64)
+# The diffusive x-flux is computed in a per-row Float64 scratch vector and consumed immediately by
+# the divergence, avoiding the full-array zero/write/read-back of a 3-D flux buffer (~3 extra
+# 4.7 MB passes/tracer). Numerically bit-identical to the old buffer version.
+function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     m = nx + 2*ng
@@ -900,11 +905,10 @@ function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxe
     end
 end
 
-# `fluxes_y` retained for signature compatibility but UNUSED (see diffuse_x!). Uses a rolling
-# 2-row flux scratch (`face_lo`/`face_hi`, each a full i-row) so the y-face flux + divergence both
-# iterate i-inner (contiguous in column-major memory) — avoiding both the full 3-D flux buffer AND
-# the strided per-column access a naive `j`-inner scratch would incur. Bit-identical math.
-function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_y, D_crit::Float64)
+# Uses a rolling 2-row flux scratch (`face_lo`/`face_hi`, each a full i-row) so the y-face flux +
+# divergence both iterate i-inner (contiguous in column-major memory) — avoiding both the full 3-D
+# flux buffer AND the strided per-column access a naive `j`-inner scratch would incur. Bit-identical.
+function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     mx = nx + 2*ng

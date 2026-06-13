@@ -275,10 +275,10 @@ limiter" contradicted it and is **refuted by measurement**.
 
 **Conclusion: no cheap *advection* speed-up remains, but diffusion had a real one — see #9.** The
 lever is **cutting distinct per-tracer traffic**. Diffusion turned out to be ~40% of the horizontal
-step and was carrying a wholly-removable full 3-D flux buffer (#9, **done, −14–18%**). Beyond that,
-**fusing the 4 sweeps** (adv+diff per direction → 2) would remove the tracer-field re-read between
-advection and diffusion (~2 more passes) — a deeper refactor (operator-split order; folding diffusion
-into the FCT flux), guarded by the conservation/positivity tests + real-data checksum.
+step and was carrying a wholly-removable full 3-D flux buffer (#9, **done, −14–18%**). The further
+step — **fusing the 4 sweeps** (adv+diff per direction → 2) — was tried and **rejected** (#10:
++7–8% regression; the per-column fused y-sweep must read diffusion geometry strided, which costs more
+than the saved field re-read — #9's rolling buffer reads it contiguously).
 Baselines (real grid, 8 threads, `julia +nightly`, *pre-#9*): **8 tracers ≈ 118 ms, 20 tracers ≈
 307 ms** per step — expect ±20% noise on this laptop; **always compare best-of-N within ONE process**
 (interleaved A/B), never across separate runs (thermal drift swamps the signal — this is how the
@@ -300,10 +300,25 @@ by the divergence — **no full flux buffer**.
 - **Correctness:** x bit-identical; y differs 7e-9 because the new Float64 flux scratch skips the old
   Float32 pool round-trip — i.e. *slightly more* accurate. All 110 unit tests pass (incl. the
   sediment `rtol=1e-9` mass-conservation assert).
-- The `fluxes_*` arg is retained in the signature (TVD/UP3/ADI call sites unchanged) but unused by the
-  diffusion path. *Optional follow-up:* in the `:FFSL` branch the flux pools are now wholly unused
-  (both advection and diffusion use per-line scratch) — `_ensure_flux_pools!` could be skipped there
-  to drop ~75 MB of idle buffers (memory, not speed). Scaffold: `claude/bench_diff_ab.jl`.
+- Scaffold: `claude/bench_diff_ab.jl` (same-process interleaved A/B).
+- **Cleanup (committed `564c2f7`):** the now-dead `fluxes_*` arg was removed from `diffuse_{x,y}!`
+  (they use their own scratch); diffusion is a single common step after the advection branch. And the
+  `:FFSL` branch now skips `_ensure_flux_pools!` entirely (advection + diffusion are both per-line) —
+  drops ~75 MB of idle buffers on the 20-tracer grid. Bit-identical, 110 tests pass.
+
+### #10 — FFSL adv+diff fusion (4 sweeps → 2)  *(REJECTED: +7–8% regression)*
+
+Tried fusing advection+diffusion per direction (`advect_diffuse_{x,y}_ffsl!`): one C read + one C
+write per direction (2 sweeps) instead of 4, diffusing the advected row/column (sequential split
+`[Ax,Dx,Ay,Dy]`). Mass conserved (2e-9), positivity same as separate (both leave a tiny ~-6e-5 min
+from the explicit-diffusion overshoot — pre-existing, not introduced by fusion). **But it was +7%
+(8tr) / +8% (20tr) SLOWER** (same-process interleaved A/B vs separate-with-#9), so reverted (commit
+kept only #9 + the cleanup). **Why:** the fused y-sweep is per-column (FFSL gathers a j-column), so
+its diffusion geometry reads (`face_area_y`, `zeta`, `h`, `pn` at fixed i, varying j) are **strided**
+in column-major memory — exactly the access pattern #9's standalone `diffuse_y!` avoids with its
+i-contiguous rolling 2-row buffer. The strided-geometry penalty exceeds the saved tracer-field
+re-read. **Lesson: contiguity beats pass-count here; #9's separate-but-contiguous diffusion is the
+better structure.** Scaffold: `claude/bench_fusion_ab.jl`. No cheap horizontal lever now remains.
 
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 

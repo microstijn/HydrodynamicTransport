@@ -67,6 +67,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         output_dir::Union{String, Nothing}=nothing,
                         output_interval::Union{Float64, Nothing}=nothing,
                         write_full_state::Bool=true,
+                        tracer_only_output::Bool=false,  # save only `state.tracers` (+ time); drop hydro/scratch. Analysis-only, NOT a restart checkpoint.
                         full_state_output_interval::Union{Float64, Nothing}=output_interval,
                         receptor_monitors::Vector{ReceptorMonitor}=ReceptorMonitor[],
                         receptor_monitor_interval::Union{Float64, Nothing}=output_interval,
@@ -210,7 +211,15 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
         if write_full_state && output_dir !== nothing && time >= next_full_state_output_time - 1e-9
             output_filename = joinpath(output_dir, "state_t_$(round(Int, time)).jld2")
-            jldsave(output_filename; state=state, virtual_oysters=virtual_oysters)
+            if tracer_only_output
+                # Kernel product only: keep just the tracer fields (+ time). The dropped hydro and
+                # scratch/flux buffers are reconstructable on the fly from the source .nc via
+                # update_hydrodynamics!. Keeps the "state" key + `.tracers` so readers (e.g. E1) are
+                # unchanged. NOTE: not a valid restart checkpoint (no hydro/buffers).
+                jldsave(output_filename; state=(; tracers=state.tracers, time=state.time))
+            else
+                jldsave(output_filename; state=state, virtual_oysters=virtual_oysters)
+            end
             next_full_state_output_time += full_state_output_interval
         end
 

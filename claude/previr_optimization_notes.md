@@ -77,9 +77,10 @@ julia +nightly validate_optim.jl       # needs the local run_curviloire_2015.nc
 Always run before committing any further **optimization** — those must stay bit-identical.
 **Validate on the curvilinear + real-data path** — a Cartesian/placeholder grid does NOT exercise
 #1 at all. The `validate_optim.jl` reference checksum was **reset by the MARS3D sigma fix** (a
-deliberate correctness change — see below); current baseline `sumA=2.13405215351185936e+05`,
-`sumB=1.57919699720827942e+11`. The pre-sigma value was `sumA=2.17524864653079800e+05`,
-`sumB=8.29916896815613261e+05` (that grid had wrong, dimensionless cell volumes).
+deliberate correctness change — see below); current baseline `sumA=2.12878484367176134e+05`,
+`sumB=4.69499076685949112e+05` (sigma fix + `min_depth=0.5`). The pre-sigma value was
+`sumA=2.17524864653079800e+05`, `sumB=8.29916896815613261e+05` (that grid had wrong,
+dimensionless cell volumes).
 
 ---
 
@@ -132,17 +133,29 @@ wrong (dimensionless) `dz`. **Fixed** (`GridModule.jl`, `VerticalTransportModule
 
 **Validation:** `validate_sigma.jl` (real MARS3D grid) — sigma detected, `Σ_k dz = H0` to machine
 precision, `dz` spatially variable 0.1–8.6 m, volumes 10³–10⁷ m³, short run finite + conserving.
-107/107 unit tests pass (new `MARS3D sigma vertical coordinate` testset). **`validate_optim.jl`
-checksum intentionally changes** (the old numbers were wrong); new corrected baseline:
-`sumA=2.13405215351185936e+05 sumB=1.57919699720827942e+11`.
+110/110 unit tests pass (new `MARS3D sigma vertical coordinate` testset, incl. `min_depth`).
+**`validate_optim.jl` checksum intentionally changes** (the old numbers were wrong); new corrected
+baseline (sigma + `min_depth=0.5`): `sumA=2.12878484367176134e+05 sumB=4.69499076685949112e+05`.
 
-**⚠ Newly exposed (separate) issue — near-dry fringe cells.** With correct volumes, the global
-minimum *wet* volume is ~**0.1 m³** because `mask = H0 > 0` admits cells as shallow as
-`H0≈0.0024 m`. Mass advected into such a cell gives a huge `C = mass/V` (the `validate_optim`
-upstream source B drives `maxB ~3e10`; `sumB` is now dominated by it). The volumes are *correct* —
-the problem is the model treating ~mm-deep cells as wet. **Not addressed here** (would change the
-wet mask broadly); candidate fixes: mask cells with `H0 < D_crit` as land, or floor/cap volume.
-This is likely related to the campaign `dt~1s` / pathological thin cells (Roadmap #1).
+### Follow-up — near-dry cells break explicit TVD  *(fixed: `min_depth`)*
+
+Correct (depth-scaled) volumes exposed a latent **TVD positivity weakness**: in the thin upstream
+channel, the small shallow-cell volumes make the explicit `dt/volume` advection term lose
+positivity, producing unbounded ± oscillations that the open-boundary feedback then re-injects —
+**non-conservation by ~230×** (`validate_optim` tracer B: `maxC~3e10`, `minC~-1.8e10`, total mass
+230× the injected mass). Diagnosis: **smaller `dt` makes it *worse*** (so it's not a CFL limit —
+it's the per-step `1/V` amplification compounding), and **`:FFSL` is unaffected** (conservative +
+positive by construction: `maxC~5e4`, `mass/inj=0.58`, same as the healthy deep tracer A).
+
+**Fix:** `initialize_curvilinear_grid(...; min_depth=0.5)` (default **0.5 m**) — cells with
+`0 < H0 < min_depth` are masked out as **land** (zero-depth → mask off, zero-area faces via the
+`min` face depth, floored volume), so no flux enters them. On CurviLoire this removes 233 fringe
+cells (0.94 %, all `< 0.5 m` intertidal flats a static-volume model can't represent anyway) and
+restores TVD to `mass/inj=0.58` (matching FFSL / tracer A), `maxC~5e4`. `min_depth=0.0` opts out
+(raw `H0>0` mask). Thresholds 0.2 m still blow up (the binding cell is `H0=0.46 m`); 0.5 m is the
+first that catches it — **`:FFSL` needs no `min_depth`**, so it stays the robust choice for thin
+estuary channels. (Plausibly the same pathological-thin-cell family behind the campaign `dt~1s`,
+Roadmap #1.)
 
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 

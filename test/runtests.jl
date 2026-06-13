@@ -188,8 +188,9 @@ end
             end
             defVar(ds, "lon_rho", [-2.0 + 0.01*(i-1) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
             defVar(ds, "lat_rho", [47.0 + 0.01*(j-1) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
-            # Depth 20 m everywhere except a deeper interior column (40 m) and a dry corner (0 m).
-            H0 = fill(20.0, nx, ny); H0[4, 3] = 40.0; H0[1, 1] = 0.0
+            # Depth 20 m everywhere except a deeper interior column (40 m), a dry corner (0 m),
+            # and a too-shallow intertidal cell (0.3 m) that min_depth should mask out as land.
+            H0 = fill(20.0, nx, ny); H0[4, 3] = 40.0; H0[1, 1] = 0.0; H0[2, 4] = 0.3
             defVar(ds, "H0", H0, ("xi_rho", "eta_rho"))
             defVar(ds, "dx", fill(100.0, nx, ny), ("xi_rho", "eta_rho"))
             defVar(ds, "dy", fill(100.0, nx, ny), ("xi_rho", "eta_rho"))
@@ -224,6 +225,14 @@ end
             @test !grid.mask_rho[ng + 1, ng + 1]
             @test grid.volume[ng + 1, ng + 1, 1] > 0.0
             @test grid.face_area_x[ng + 2, ng + 1, 1] ≈ 0.0   # face between dry (1,1) and (2,1)
+
+            # Too-shallow cell (H0=0.3 < default min_depth=0.5) is masked out as land, with zero-area
+            # faces -- this prevents the explicit-advection dt/volume blow-up in thin sigma cells.
+            @test !grid.mask_rho[ng + 2, ng + 4]
+            @test grid.face_area_y[ng + 2, ng + 4, 1] ≈ 0.0
+            # ...but with min_depth=0 it stays wet (opt-out preserves the raw bathymetry mask).
+            grid0 = initialize_curvilinear_grid(path; min_depth = 0.0)
+            @test grid0.mask_rho[ng + 2, ng + 4]
 
             # End-to-end run on the sigma grid stays finite (the depth-scaled volumes used to NaN).
             hydro = create_hydrodynamic_data_from_file(path)

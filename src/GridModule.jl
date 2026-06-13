@@ -91,7 +91,7 @@ function _sigma_centers_to_interfaces(centers::AbstractVector)
 end
 
 # --- Refactored Curvilinear Grid Initializer with Auto-Detection ---
-function initialize_curvilinear_grid(netcdf_filepath::String; ng::Int=2)::CurvilinearGrid
+function initialize_curvilinear_grid(netcdf_filepath::String; ng::Int=2, min_depth::Float64=0.5)::CurvilinearGrid
     ds = NCDataset(netcdf_filepath)
     grid_vars = _autodetect_grid_vars_and_dims(ds)
     nx_rho, ny_rho = ds.dim[grid_vars[:ni_rho]], ds.dim[grid_vars[:nj_rho]]; nx_u, ny_u = ds.dim[grid_vars[:ni_u]], ds.dim[grid_vars[:nj_u]]; nx_v, ny_v = ds.dim[grid_vars[:ni_v]], ds.dim[grid_vars[:nj_v]]; nz = ds.dim[grid_vars[:nz]]
@@ -101,12 +101,23 @@ function initialize_curvilinear_grid(netcdf_filepath::String; ng::Int=2)::Curvil
     rho_interior(lon_rho_full) .= coalesce.(ds[grid_vars[:lon_rho]][:,:], 0.0); rho_interior(lat_rho_full) .= coalesce.(ds[grid_vars[:lat_rho]][:,:], 0.0)
     rho_interior(h_full) .= coalesce.(ds[grid_vars[:h]][:,:], 0.0)
 
+    # Treat too-shallow cells as land. On a sigma grid the cell volume scales with the local
+    # depth, so cells with a few-cm bathymetry get near-zero volumes, where the explicit advection's
+    # dt/volume term loses positivity and blows up. Zeroing their depth makes them land everywhere
+    # (mask off, zero-area faces via the min() face depth, floored volume) so no flux can enter.
+    if min_depth > 0.0
+        hi = rho_interior(h_full)
+        @. hi = ifelse(0.0 < hi < min_depth, 0.0, hi)
+    end
+
     # --- FIX: Intelligently create the mask based on what's available ---
     if haskey(grid_vars, :mask_rho)
         rho_interior(mask_rho_full) .= (coalesce.(ds[grid_vars[:mask_rho]][:,:], 0) .== 1)
     else # Infer mask from bathymetry (H0 > 0 is water)
         rho_interior(mask_rho_full) .= (rho_interior(h_full) .> 0.0)
     end
+    # A cell with no (or sub-threshold) depth cannot be wet, whatever an explicit mask says.
+    rho_interior(mask_rho_full) .&= (rho_interior(h_full) .> 0.0)
     
     if haskey(grid_vars, :is_inverse_metric); rho_interior(pm_full) .= 1 ./ coalesce.(ds[grid_vars[:pm]][:,:], 1.0); rho_interior(pn_full) .= 1 ./ coalesce.(ds[grid_vars[:pn]][:,:], 1.0); else; rho_interior(pm_full) .= coalesce.(ds[grid_vars[:pm]][:,:], 0.0); rho_interior(pn_full) .= coalesce.(ds[grid_vars[:pn]][:,:], 0.0); end
     if haskey(grid_vars, :angle); rho_interior(angle_full) .= coalesce.(ds[grid_vars[:angle]][:,:], 0.0); end

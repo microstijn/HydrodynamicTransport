@@ -49,7 +49,7 @@ function calculate_max_cfl_term(state::State, grid::CurvilinearGrid)
                 # Find the maximum vertical component in this column
                 max_cfl_term_vert = 0.0
                 for k in 1:nz
-                    dz = abs(grid.z_w[k+1] - grid.z_w[k])
+                    dz = grid.volume[i_glob, j_glob, k] * grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob]  # physical [m]
                     w_center = 0.5 * (w[i_glob, j_glob, k] + w[i_glob, j_glob, k+1])
                     cfl_term_vert = abs(w_center) / dz
                     if cfl_term_vert > max_cfl_term_vert

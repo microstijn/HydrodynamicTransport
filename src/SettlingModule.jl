@@ -59,7 +59,8 @@ function apply_settling!(state::State, grid::AbstractGrid, dt::Float64, sediment
 
             # --- 1. Construct the bidiagonal system for the column ---
             for k in 1:nz
-                dz_k = isa(grid, CartesianGrid) ? grid.volume[i_glob, j_glob, k] / grid.face_area_z[i_glob, j_glob, k] : abs(grid.z_w[k+1] - grid.z_w[k])
+                # Physical layer thickness [m] = volume / horizontal cell area (sigma-aware).
+                dz_k = isa(grid, CartesianGrid) ? grid.volume[i_glob, j_glob, k] / grid.face_area_z[i_glob, j_glob, k] : grid.volume[i_glob, j_glob, k] * grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob]
                 courant_k = ws * dt / dz_k
 
                 b[k] = 1.0 + courant_k

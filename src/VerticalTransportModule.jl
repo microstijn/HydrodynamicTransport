@@ -49,7 +49,7 @@ function solve_implicit_diffusion_column!(
     nz = length(C_in_col)
     if nz <= 1; C_out_col .= C_in_col; return; end
 
-    @inbounds dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
+    @inbounds dz_vec = [get_dz_centers(grid, i_glob, j_glob, k) for k in 1:nz]   # physical [m], per column
     alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
     
     lower_A = -alpha[2:end]; main_A  = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
@@ -67,26 +67,46 @@ function solve_implicit_diffusion_column!(
 end
 
 
-# --- Uniform Crank-Nicolson vertical-diffusion operator (CurvilinearGrid) ---
-# grid.z_w is spatially uniform, so the implicit operator A and the explicit operator B are
-# identical for every water column. Build them once and factorize A once, then reuse the
-# factorization across all columns. Numerically identical to the per-column `A \ (B*C)` path
-# (same A, same B, same LU), but without rebuilding/re-factorizing per column.
-function _build_cn_diffusion_operator(grid::CurvilinearGrid, dt::Float64, Kz::Float64)
-    @inbounds dz_vec = abs.(grid.z_w[2:end] - grid.z_w[1:end-1])
-    alpha = 0.5 * Kz * dt ./ (dz_vec .* dz_vec)
-
-    lower_A = -alpha[2:end]; main_A = 1.0 .+ 2.0 .* alpha; upper_A = -alpha[1:end-1]
-    main_A[1] = 1.0 + 2.0 * alpha[1]; upper_A[1] = -2.0 * alpha[1]
-    main_A[end] = 1.0 + 2.0 * alpha[end]; lower_A[end] = -2.0 * alpha[end]
-    A = Tridiagonal(lower_A, main_A, upper_A)
-
-    lower_B = alpha[2:end]; main_B = 1.0 .- 2.0 .* alpha; upper_B = alpha[1:end-1]
-    main_B[1] = 1.0 - 2.0 * alpha[1]; upper_B[1] = 2.0 * alpha[1]
-    main_B[end] = 1.0 - 2.0 * alpha[end]; lower_B[end] = 2.0 * alpha[end]
-    B = Tridiagonal(lower_B, main_B, upper_B)
-
-    return lu(A), B
+# --- Allocation-free per-column Crank-Nicolson vertical diffusion (CurvilinearGrid) ---
+# On a sigma grid the layer thickness (hence the CN coefficient alpha) varies per water column,
+# so the tridiagonal operator can no longer be factorized once and shared across columns. Instead
+# each column is solved directly with the Thomas algorithm using preallocated per-task scratch
+# (no allocation, no GC -> retains the bulk of the factorize-once speed-up, which came from
+# killing per-column allocation rather than from sharing the LU). Same Crank-Nicolson scheme as
+# before (reflective/no-flux top & bottom): the operators A (implicit) and B (explicit) are
+# rebuilt from the per-layer `alpha[k] = 0.5·Kz·dt/dz_k²`. For a spatially uniform grid this is
+# numerically equivalent to the old shared-operator path (same A, same B).
+#
+#   alpha  : per-layer CN coefficient (length nz)            [in]
+#   dl,dd,du : scratch for A's sub/main/super diagonals      [scratch]
+#   rhs    : scratch, receives B·Cin then the solution       [scratch]
+#   cprime : Thomas forward-sweep scratch                    [scratch]
+@inline function _cn_diffuse_column!(Cout, Cin, alpha, nz, dl, dd, du, rhs, cprime)
+    @inbounds begin
+        # rhs = B·Cin and assemble A's diagonals. Off-diagonal weight to the single boundary
+        # neighbour is doubled (reflective no-flux), matching the original operator.
+        for k in 1:nz
+            s = (1.0 - 2.0*alpha[k]) * Cin[k]
+            if k > 1;  s += (k == nz ? 2.0*alpha[k] : alpha[k]) * Cin[k-1]; end
+            if k < nz; s += (k == 1  ? 2.0*alpha[k] : alpha[k]) * Cin[k+1]; end
+            rhs[k] = s
+            dd[k] = 1.0 + 2.0*alpha[k]
+            dl[k] = (k == nz ? -2.0*alpha[k] : -alpha[k])   # sub-diagonal   (row k, couples k-1)
+            du[k] = (k == 1  ? -2.0*alpha[k] : -alpha[k])   # super-diagonal (row k, couples k+1)
+        end
+        # Thomas solve: A·x = rhs, A = Tridiagonal(dl, dd, du).
+        cprime[1] = du[1] / dd[1]; rhs[1] = rhs[1] / dd[1]
+        for k in 2:nz
+            m = dd[k] - dl[k]*cprime[k-1]
+            cprime[k] = du[k] / m
+            rhs[k] = (rhs[k] - dl[k]*rhs[k-1]) / m
+        end
+        Cout[nz] = rhs[nz]
+        for k in nz-1:-1:1
+            Cout[k] = rhs[k] - cprime[k]*Cout[k+1]
+        end
+    end
+    return nothing
 end
 
 # --- Main transport function (Multithreaded over tracers) ---
@@ -96,13 +116,6 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     if nz <= 1; return; end
 
-    # Curvilinear diffusion operator is column-independent -> build + factorize once per call
-    # (shared read-only across the tracer tasks).
-    local F_diff, B_diff
-    if isa(grid, CurvilinearGrid)
-        F_diff, B_diff = _build_cn_diffusion_operator(grid, dt, Kz)
-    end
-
     # Tracers are independent -> parallelize over them; each task owns small column scratch.
     tracer_names = collect(keys(state.tracers))
     ntr = length(tracer_names)
@@ -111,6 +124,9 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Threads.@threads for cid in 1:nchunks
         flux_col = Vector{Float64}(undef, nz + 1)   # per-task vertical-flux column scratch
         rhs = Vector{Float64}(undef, nz)            # per-task tridiagonal RHS scratch
+        # Per-task CN-diffusion column scratch (CurvilinearGrid path).
+        alpha = Vector{Float64}(undef, nz); dl = Vector{Float64}(undef, nz)
+        dd = Vector{Float64}(undef, nz); du = Vector{Float64}(undef, nz); cprime = Vector{Float64}(undef, nz)
         ti = cid
         while ti <= ntr
             tracer_name = tracer_names[ti]
@@ -151,9 +167,12 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
                 @inbounds for j_phys in 1:ny, i_phys in 1:nx
                     i_glob, j_glob = i_phys + ng, j_phys + ng
                     C_col_in = view(C_buffer, i_glob, j_glob, :)
-                    mul!(rhs, B_diff, C_col_in)   # rhs = B * C
-                    ldiv!(F_diff, rhs)            # solve A * x = rhs in place (reuses factorization)
-                    view(C_final, i_glob, j_glob, :) .= rhs
+                    C_col_out = view(C_final, i_glob, j_glob, :)
+                    for k in 1:nz
+                        dz_k = get_dz_centers(grid, i_glob, j_glob, k)
+                        alpha[k] = dz_k > 0.0 ? 0.5 * Kz * dt / (dz_k * dz_k) : 0.0
+                    end
+                    _cn_diffuse_column!(C_col_out, C_col_in, alpha, nz, dl, dd, du, rhs, cprime)
                 end
             else
                 @inbounds for j_phys in 1:ny, i_phys in 1:nx
@@ -193,8 +212,8 @@ function advect_diffuse_implicit_z!(C_out::Array{Float64, 3}, C_in::Array{Float6
             i_glob, j_glob = i_phys + ng, j_phys + ng
 
             for k_phys in 1:nz
-                dz = isa(grid, CartesianGrid) ? grid.volume[i_glob,j_glob,k_phys] / grid.face_area_z[i_glob,j_glob,k_phys] : abs(grid.z_w[k_phys+1] - grid.z_w[k_phys])
-                
+                dz = get_dz_centers(grid, i_glob, j_glob, k_phys)
+
                 w_bottom = w[i_glob, j_glob, k_phys]
                 w_top    = w[i_glob, j_glob, k_phys + 1]
 
@@ -398,7 +417,9 @@ end
 # helper function for dz centers (needed for flux limiting)
 
 @inline get_dz_centers(grid::CartesianGrid, i_glob, j_glob, k_cell) = grid.volume[i_glob,j_glob,k_cell] / grid.face_area_z[i_glob,j_glob,k_cell]
-@inline get_dz_centers(grid::CurvilinearGrid, i_glob, j_glob, k_cell) = abs(grid.z_w[k_cell+1] - grid.z_w[k_cell])
+# Physical layer thickness [m] = volume / horizontal cell area = volume·pm·pn. On a sigma grid
+# this is Δσ_k·H0(i,j) (spatially varying); on the legacy uniform grid it reduces to |Δz_w|.
+@inline get_dz_centers(grid::CurvilinearGrid, i_glob, j_glob, k_cell) = grid.volume[i_glob,j_glob,k_cell] * grid.pm[i_glob,j_glob] * grid.pn[i_glob,j_glob]
 
 """
     get_dz_at_face(grid, i_glob, j_glob, k_face)

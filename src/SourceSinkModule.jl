@@ -112,7 +112,17 @@ function source_sink_terms!(state::State, grid::AbstractGrid, sources::Vector{Po
                         continue
                     end
 
-                    depth = isa(grid, CartesianGrid) ? -grid.z[i_glob, j_glob, k_glob] : -grid.z_w[k_glob]
+                    # Physical depth [m] of the layer centre below the surface (surface at k=nz).
+                    # On a sigma grid this is recovered from the cell volumes (= Δσ·H0 per layer),
+                    # not from the dimensionless sigma coordinate.
+                    depth = if isa(grid, CartesianGrid)
+                        -grid.z[i_glob, j_glob, k_glob]
+                    else
+                        area = grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob]
+                        d = 0.5 * grid.volume[i_glob, j_glob, k_glob] * area
+                        for l in (k_glob+1):nz_p; d += grid.volume[i_glob, j_glob, l] * area; end
+                        d
+                    end
                     environment = (
                         T = isdefined(state, :temperature) ? state.temperature[i_glob, j_glob, k_glob] : NaN,
                         S = isdefined(state, :salinity) ? state.salinity[i_glob, j_glob, k_glob] : NaN,

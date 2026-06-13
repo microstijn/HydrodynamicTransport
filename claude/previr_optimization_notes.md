@@ -68,15 +68,18 @@ Scratch buffers (`_buffer1/_buffer2`, `flux_*`) are not copied (overwritten befo
 |---|---|
 | `validate_interp.jl` | `update_hydrodynamics!` interpolation + clamping + **non-monotonic** time with the cache (synthetic 1×1×1 NetCDF; fast) |
 | `validate_optim.jl` | 1-hour run on the **real CurviLoire 2015 curvilinear grid + real NetCDF path** (#1 *and* #2 through the full loop); prints a 17-sig-fig checksum |
+| `validate_sigma.jl` | MARS3D **sigma vertical-coordinate** correctness (real grid): sigma detected, `Σdz=H0`, physical `dz`/volumes, short run finite + conserving |
 
 ```
 julia +nightly validate_interp.jl      # synthetic, fast
 julia +nightly validate_optim.jl       # needs the local run_curviloire_2015.nc
 ```
-Both currently pass; `validate_optim.jl` is **bit-identical** before/after the changes
-(`sumA=2.17524864653079800e+05`, `sumB=8.29916896815613261e+05`, …). Always run both before
-committing any further optimization. **Validate on the curvilinear + real-data path** — a
-Cartesian/placeholder grid does NOT exercise #1 at all.
+Always run before committing any further **optimization** — those must stay bit-identical.
+**Validate on the curvilinear + real-data path** — a Cartesian/placeholder grid does NOT exercise
+#1 at all. The `validate_optim.jl` reference checksum was **reset by the MARS3D sigma fix** (a
+deliberate correctness change — see below); current baseline `sumA=2.13405215351185936e+05`,
+`sumB=1.57919699720827942e+11`. The pre-sigma value was `sumA=2.17524864653079800e+05`,
+`sumB=8.29916896815613261e+05` (that grid had wrong, dimensionless cell volumes).
 
 ---
 
@@ -99,6 +102,47 @@ baseline: **~2568 → ~618 ms/step (4.2×)**.
 *older* struct may fail (regenerate checkpoints). `run_and_store_simulation` still `deepcopy`s
 the whole `State` per step, which now also copies the flux pools — another reason to migrate it
 off `deepcopy` (or leave it; it's not on the campaign path).
+
+## Correctness fix — MARS3D sigma vertical coordinate  *(NOT bit-identical — intentional)*
+
+The CurviLoire campaign file is **MARS3D**: it has **no** ROMS `s_w`/`Cs_w`/`hc`, only a CF
+`ocean_sigma_coordinate` (`level`/`SIG`, layer **centres** in `[-1,0]`, uniform Δσ=0.1) plus
+bathymetry `H0` and SSH `XE`. `initialize_curvilinear_grid` previously only knew the ROMS form,
+so it fell back to `z_w=[-1…0]` → **dimensionless `dz=0.1`**. Cell volumes were therefore
+~`depth`-times too small (and spatially undistorted), and the vertical CN diffusion used the
+wrong (dimensionless) `dz`. **Fixed** (`GridModule.jl`, `VerticalTransportModule.jl`,
+`SettlingModule.jl`, `UtilsModule.jl`, `SourceSinkModule.jl`):
+
+- `GridModule` detects the sigma coordinate (`_autodetect…` → `:sigma_center`), builds the
+  dimensionless sigma **interfaces** from the centres (`_sigma_centers_to_interfaces`), and scales
+  the metrics by the **per-column depth**: physical thickness `dz(i,j,k)=Δσ_k·H0(i,j)` [m].
+  Volumes are now in **m³** and vary with depth. **Decision: depth = `H0` only** (static; SSH `XE`
+  averages to ~0 over a tidal run, and a time-varying volume would need ALE / a volume-flux term —
+  out of scope). Non-sigma (ROMS/synthetic) grids are byte-for-byte unchanged (`is_sigma=false`).
+- Physical `dz` is recovered everywhere as `volume·pm·pn` (no new grid field; one definition in
+  `get_dz_centers`); all `z_w`-difference `dz` look-ups were switched to it.
+- **Face** thickness uses `min` of the two column depths (conservative; zero over land → no-flow at
+  the coast; keeps `face_area/volume ≤ pm` so the `u·pm` advective-CFL estimate stays valid — an
+  *averaged* face depth amplifies flux into thin cells at steep slopes and **NaNs**).
+- **Dry cells keep a floored (1 m nominal) volume** so `volume>0` everywhere — several kernels
+  divide by `volume` unguarded (e.g. `advect_x/y_tvd!`) and relied on the old never-zero volume.
+- The vertical CN factorize-once (#3) **could no longer be shared** (α now per-column), so it is
+  now an **allocation-free per-column Thomas solve** (`_cn_diffuse_column!`). The 9.1× win came
+  from killing per-column *allocation*, not from sharing the LU, so most of it is retained.
+
+**Validation:** `validate_sigma.jl` (real MARS3D grid) — sigma detected, `Σ_k dz = H0` to machine
+precision, `dz` spatially variable 0.1–8.6 m, volumes 10³–10⁷ m³, short run finite + conserving.
+107/107 unit tests pass (new `MARS3D sigma vertical coordinate` testset). **`validate_optim.jl`
+checksum intentionally changes** (the old numbers were wrong); new corrected baseline:
+`sumA=2.13405215351185936e+05 sumB=1.57919699720827942e+11`.
+
+**⚠ Newly exposed (separate) issue — near-dry fringe cells.** With correct volumes, the global
+minimum *wet* volume is ~**0.1 m³** because `mask = H0 > 0` admits cells as shallow as
+`H0≈0.0024 m`. Mass advected into such a cell gives a huge `C = mass/V` (the `validate_optim`
+upstream source B drives `maxB ~3e10`; `sumB` is now dominated by it). The volumes are *correct* —
+the problem is the model treating ~mm-deep cells as wet. **Not addressed here** (would change the
+wet mask broadly); candidate fixes: mask cells with `H0 < D_crit` as land, or floor/cap volume.
+This is likely related to the campaign `dt~1s` / pathological thin cells (Roadmap #1).
 
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 

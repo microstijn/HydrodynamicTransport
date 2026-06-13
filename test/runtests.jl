@@ -173,6 +173,71 @@ end
         end
     end
 
+    @testset "MARS3D sigma vertical coordinate" begin
+        # A MARS3D-style file: a CF `ocean_sigma_coordinate` (layer CENTRES in [-1,0]) + bathymetry
+        # H0, and NO ROMS s_w/Cs_w/hc. The physical layer thickness must be Δσ_k·H0(i,j) [m], so
+        # cell volumes scale with depth and vary spatially (the old code fell back to a dimensionless
+        # dz=1/nz, giving depth-times-too-small volumes).
+        mktempdir() do dir
+            path = joinpath(dir, "sigma.nc")
+            nx, ny, nz = 6, 5, 4
+            ds = NCDataset(path, "c")
+            for (d, n) in (("xi_rho", nx), ("eta_rho", ny), ("xi_u", nx), ("eta_u", ny),
+                           ("xi_v", nx), ("eta_v", ny), ("level", nz), ("ocean_time", 2))
+                defDim(ds, d, n)
+            end
+            defVar(ds, "lon_rho", [-2.0 + 0.01*(i-1) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
+            defVar(ds, "lat_rho", [47.0 + 0.01*(j-1) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
+            # Depth 20 m everywhere except a deeper interior column (40 m) and a dry corner (0 m).
+            H0 = fill(20.0, nx, ny); H0[4, 3] = 40.0; H0[1, 1] = 0.0
+            defVar(ds, "H0", H0, ("xi_rho", "eta_rho"))
+            defVar(ds, "dx", fill(100.0, nx, ny), ("xi_rho", "eta_rho"))
+            defVar(ds, "dy", fill(100.0, nx, ny), ("xi_rho", "eta_rho"))
+            defVar(ds, "angle", zeros(nx, ny), ("xi_rho", "eta_rho"))
+            # Sigma layer centres in [-1, 0] (uniform Δσ = 1/nz), as in the MARS3D `level` variable.
+            sigc = defVar(ds, "level", collect(range(-1.0 + 0.5/nz, -0.5/nz, length = nz)), ("level",))
+            sigc.attrib["standard_name"] = "ocean_sigma_coordinate"
+            defVar(ds, "ocean_time", [0.0, 3600.0], ("ocean_time",))
+            u = defVar(ds, "u", Float64, ("xi_u", "eta_u", "level", "ocean_time"))
+            v = defVar(ds, "v", Float64, ("xi_v", "eta_v", "level", "ocean_time"))
+            for t in 1:2; u[:, :, :, t] = fill(0.05, nx, ny, nz); v[:, :, :, t] = fill(0.03, nx, ny, nz); end
+            close(ds)
+
+            grid = initialize_curvilinear_grid(path)
+            ng = grid.ng
+            @test grid.nz == nz
+            @test grid.z_w[1] ≈ -1.0 && grid.z_w[end] ≈ 0.0 && length(grid.z_w) == nz + 1
+
+            # Physical layer thickness = volume·pm·pn. Interior 20 m column -> dz = 5 m, Σ = 20 m.
+            dzc(i, j, k) = grid.volume[i, j, k] * grid.pm[i, j] * grid.pn[i, j]
+            i0, j0 = ng + 3, ng + 2                       # an interior 20 m water cell
+            @test all(isapprox(dzc(i0, j0, k), 5.0) for k in 1:nz)
+            @test sum(dzc(i0, j0, k) for k in 1:nz) ≈ 20.0
+            # Deeper column (40 m) has 2x the thickness/volume of the 20 m column.
+            @test dzc(ng + 4, ng + 3, 1) ≈ 10.0
+            @test grid.volume[ng + 4, ng + 3, 1] ≈ 2 * grid.volume[i0, j0, 1]
+            # Volume in metres^3 (dx=dy=100, dz=5 -> 5e4), not the old dimensionless ~1.25e3.
+            @test grid.volume[i0, j0, 1] ≈ 100.0 * 100.0 * 5.0
+
+            # Dry corner: masked out, keeps a strictly positive (floored) volume, and its faces to
+            # neighbours carry zero area (no-flow at the coast).
+            @test !grid.mask_rho[ng + 1, ng + 1]
+            @test grid.volume[ng + 1, ng + 1, 1] > 0.0
+            @test grid.face_area_x[ng + 2, ng + 1, 1] ≈ 0.0   # face between dry (1,1) and (2,1)
+
+            # End-to-end run on the sigma grid stays finite (the depth-scaled volumes used to NaN).
+            hydro = create_hydrodynamic_data_from_file(path)
+            ds2 = NCDataset(path); state = initialize_state(grid, ds2, (:T,))
+            sources = [PointSource(i = 3, j = 2, k = nz, tracer_name = :T, influx_rate = t -> 1.0e3)]
+            final = run_simulation(grid, state, sources, 0.0, 1800.0, 300.0;
+                                   ds = ds2, hydro_data = hydro, advection_scheme = :TVD,
+                                   use_adaptive_dt = true, cfl_max = 0.8, dt_max = 300.0, dt_min = 1.0)
+            @test !any(isnan, final.tracers[:T])
+            @test sum(final.tracers[:T] .* grid.volume) > 0.0
+            close(ds2)
+        end
+    end
+
     @testset "Hydrodynamics interpolation + slab cache" begin
         mktempdir() do dir
             path = joinpath(dir, "hydro.nc")

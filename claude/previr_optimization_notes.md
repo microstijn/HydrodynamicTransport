@@ -186,14 +186,35 @@ than the advective CFL (median ratio ~0.5 — UZ/VZ have strong cell-to-cell str
 needs ~2× more steps **and** costs ~1.7× more per step. It buys **fidelity, not speed**, there.
 Use it when peak/shape accuracy matters; keep `:TVD` for the campaign's cheap-kernel goal.
 
+## RESOLVED — the campaign `dt~1s` was a reporting artifact, not a CFL collapse
+
+Replicated the K7 2015 campaign (D1 numerics: TVD, `dt_init=20`, `cfl=0.9`, `dt_max=1500`,
+`dt_min=0.01`, `dt_growth=1.1`, `D_crit=0.05`; V10 sources incl. the far-upstream river cells) on
+`run_curviloire_2015.nc` for a small tracer subset. Findings (`tmp_cfl_scan` over all four 2015
+windows S1_W2/S2_W2/S6_W1/S6_W2 + a live run):
+
+- **Velocity CFL never forces small `dt`:** floor **39–52 s**, median 60–69 s, *never <30 s*,
+  binding on normal H0≈2.4–3.6 m cells. `min_depth` doesn't change it.
+- **The adaptive controller can't collapse `dt` on tracer instability** — its CFL term
+  (`calculate_max_cfl_term`) reads only `u,v`, which transport never modifies, so even a TVD
+  blow-up is *accepted* at ~60 s.
+- **The tiny `dt` is the boundary clamp** (`TimeSteppingModule.jl` ~L118-126): each step is
+  shortened to land exactly on `end_time`, the next **full-state output** time, and the next
+  **receptor-monitor** time. The campaign writes 6-hourly output and records receptor kernels
+  **hourly**, so once an hour `dt` is cut to a small remainder. The progress bar's
+  `min_timestep_s` then shows that remainder (live run with hourly output: `min_timestep_s=2.6`
+  vs `max_timestep_s=59.17`; over 336 hourly boundaries in 14 days the min remainder → ~1 s).
+- **It costs ~nothing:** ~336 short remainder-steps among ~20 000 normal ~60 s steps (the clamp
+  replaces a step, it doesn't add one). So `dt~1s` is **cosmetic** — there is no `dt` speed lever
+  here. (If the cosmetic min ever matters, align the output/receptor cadence to a multiple of the
+  working `dt`, or have the controller absorb the remainder into the prior step.)
+
 ## Roadmap — speed-ups (priority order)
 
-1. **`dt` is the next lever, not threading.** Transport is memory-bandwidth-bound, so further
-   thread work won't help much. **Diagnose what limits `dt`** before touching the CFL barrier. Instrument
-   `calculate_max_cfl_term` to report the *binding* cell/term. `dt_min=0.01` in the campaign
-   smells like a few pathological thin / wetting-drying fringe cells, not the whole field — if
-   so, **local subcycling** or capping velocity in sub-`D_crit`/thin cells recovers a large
-   global `dt` cheaply and safely.
+1. **No `dt` lever** (see RESOLVED above): the working `dt` is already ~60 s, velocity-CFL-bound on
+   ordinary cells. Transport is memory-bandwidth-bound, so further thread work won't help much.
+   A real speed-up would need a scheme change (e.g. `:FFSL` only helps where its gradient-CFL
+   exceeds the advective one — not on this estuary) or coarser output. Not worth chasing now.
 2. **Implicit vertical diffusion only** (if `Kz` / thin surface layers are the stiff term):
    a linear tridiagonal solve in `z`, unconditionally stable, well-posed. **Do NOT** revive
    implicit-TVD advection — it's nonlinear (limiter depends on the solution) and was already

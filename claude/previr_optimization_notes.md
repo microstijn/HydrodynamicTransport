@@ -100,6 +100,35 @@ baseline: **~2568 → ~618 ms/step (4.2×)**.
 the whole `State` per step, which now also copies the flux pools — another reason to migrate it
 off `deepcopy` (or leave it; it's not on the campaign path).
 
+## Advection schemes — `:FFSL` (opt-in high-fidelity)
+
+A third horizontal advection scheme alongside `:TVD` (default) and `:UP3`: **`:FFSL`**, a
+conservative **flux-form semi-Lagrangian** (Lin–Rood) sweep with monotone **PPM**
+reconstruction + **Zalesak FCT** limiter (`HorizontalTransportModule.jl`:
+`_ffsl_ppm_edges!`, `_ffsl_face_flux[_low]`, `_ffsl_line!`, `advect_{x,y}_ffsl!`; wired into
+the tracer-parallel `horizontal_transport!`). Select with `advection_scheme = :FFSL`.
+
+**Properties (validated):**
+- **Conservative** — face fluxes telescope; machine-precision mass conservation on a uniform
+  grid, FP-limited ~1e-9 on curvilinear (the `C ↔ mass` `÷V`/`×V` round-trip, since `C` not
+  `C·V` is reconstructed to stay monotone where `V` varies).
+- **Strictly positive / monotone** — FCT blends a donor-cell base with the PPM antidiffusive
+  correction; degrades gracefully to donor-cell where the gradient-CFL is violated.
+- **Peak-preserving** — retains sharp plumes ~1.5× better than TVD.
+- **Correct open-boundary outflow**; dry/land faces (mask + `D_crit`) are blocked (zero flux).
+
+**Stability limit is the velocity-gradient (Lipschitz) CFL, not the advective CFL.** FFSL is
+stable at large advective Courant, but adjacent departure points must not cross:
+`calculate_max_gradient_cfl_term · dt < 1` (`|∂u/∂x|`, `|∂v/∂y|` per direction, dimensional
+split → the *max* of the two, not the sum). The adaptive controller
+(`TimeSteppingModule.run_simulation`) automatically uses this term for `:FFSL`. Recommended
+use: `use_adaptive_dt = true` + `advection_scheme = :FFSL` to auto-pick the largest safe `dt`.
+
+**NOT a speedup on coastline/estuary grids.** On CurviLoire 2015 the gradient-CFL is *smaller*
+than the advective CFL (median ratio ~0.5 — UZ/VZ have strong cell-to-cell structure), so FFSL
+needs ~2× more steps **and** costs ~1.7× more per step. It buys **fidelity, not speed**, there.
+Use it when peak/shape accuracy matters; keep `:TVD` for the campaign's cheap-kernel goal.
+
 ## Roadmap — speed-ups (priority order)
 
 1. **`dt` is the next lever, not threading.** Transport is memory-bandwidth-bound, so further

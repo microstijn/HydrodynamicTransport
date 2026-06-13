@@ -6,6 +6,7 @@ export estimate_stable_timestep
 export create_hydrodynamic_data_from_file
 export lonlat_to_ij
 export calculate_max_cfl_term
+export calculate_max_gradient_cfl_term
 
 using Base.Threads
 using NCDatasets
@@ -99,6 +100,59 @@ function calculate_max_cfl_term(state::State, grid::CartesianGrid)
         end
     end
     return max_cfl_term[]
+end
+
+"""
+    calculate_max_gradient_cfl_term(state, grid)
+
+Scans the grid for the maximum velocity-gradient (Lipschitz) term, `|∂u/∂x| + |∂v/∂y|` in
+index units (per second). This — not the advective CFL — is the stability/monotonicity limit
+of the flux-form semi-Lagrangian (`:FFSL`) advection: the timestep must keep adjacent-face
+departure points from crossing, i.e. `term * dt < 1`. Used by the adaptive controller to pick
+the largest safe `dt` for `:FFSL`. Multithreaded.
+"""
+function calculate_max_gradient_cfl_term(state::State, grid::CurvilinearGrid)
+    u, v, pm, pn = state.u, state.v, grid.pm, grid.pn
+    ng, nx, ny, nz = grid.ng, grid.nx, grid.ny, grid.nz
+    maxterm = Threads.Atomic{Float64}(0.0)
+    Threads.@threads for j in 1:ny
+        for i in 1:nx
+            ig, jg = i + ng, j + ng
+            grid.mask_rho[ig, jg] || continue
+            local_max = 0.0
+            for k in 1:nz
+                # Dimensional splitting -> each 1-D sweep has its own gradient-CFL; the binding
+                # term is the larger of the two directions (not their sum).
+                dudx = abs(u[ig+1, jg, k] - u[ig, jg, k]) * pm[ig, jg]
+                dvdy = abs(v[ig, jg+1, k] - v[ig, jg, k]) * pn[ig, jg]
+                term = max(dudx, dvdy)
+                term > local_max && (local_max = term)
+            end
+            Threads.atomic_max!(maxterm, local_max)
+        end
+    end
+    return maxterm[]
+end
+
+function calculate_max_gradient_cfl_term(state::State, grid::CartesianGrid)
+    u, v = state.u, state.v
+    ng, (nx, ny, nz) = grid.ng, grid.dims
+    dx = grid.volume[ng+1,ng+1,1] / grid.face_area_x[ng+2,ng+1,1]
+    dy = grid.volume[ng+1,ng+1,1] / grid.face_area_y[ng+1,ng+2,1]
+    maxterm = Threads.Atomic{Float64}(0.0)
+    Threads.@threads for j in 1:ny
+        for i in 1:nx
+            ig, jg = i + ng, j + ng
+            grid.mask[ig, jg, 1] || continue
+            local_max = 0.0
+            for k in 1:nz
+                term = max(abs(u[ig+1, jg, k] - u[ig, jg, k]) / dx, abs(v[ig, jg+1, k] - v[ig, jg, k]) / dy)
+                term > local_max && (local_max = term)
+            end
+            Threads.atomic_max!(maxterm, local_max)
+        end
+    end
+    return maxterm[]
 end
 
 """

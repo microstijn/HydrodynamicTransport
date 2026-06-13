@@ -14,7 +14,7 @@ using ..HydrodynamicTransport.SettlingModule
 using ..HydrodynamicTransport.BedExchangeModule
 using ..HydrodynamicTransport.OysterModule
 using ..HydrodynamicTransport.ReceptorMonitoringModule: ReceptorMonitor, write_receptor_monitor!, flush_receptor_monitor!
-using ..HydrodynamicTransport.UtilsModule: calculate_max_cfl_term
+using ..HydrodynamicTransport.UtilsModule: calculate_max_cfl_term, calculate_max_gradient_cfl_term
 using ..HydrodynamicTransport.FluxLimitersModule 
 using ProgressMeter
 using NCDatasets
@@ -173,7 +173,11 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             end
 
             # --- Timestep Validation ---
-            cfl_actual = calculate_max_cfl_term(work, grid) * trial_dt
+            # FFSL is stable at large advective Courant; its limit is the velocity-gradient
+            # (Lipschitz) CFL instead, so the adaptive controller uses that term for :FFSL.
+            cfl_term = advection_scheme == :FFSL ? calculate_max_gradient_cfl_term(work, grid) :
+                                                   calculate_max_cfl_term(work, grid)
+            cfl_actual = cfl_term * trial_dt
 
             if use_adaptive_dt && cfl_actual > cfl_max
                 trial_dt = max(dt_min, trial_dt * 0.9 * cfl_max / (cfl_actual + 1e-9))

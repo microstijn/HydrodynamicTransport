@@ -347,4 +347,70 @@ end
         end
     end
 
+    @testset "FFSL advection (conservative semi-Lagrangian)" begin
+        Hmod = HydrodynamicTransport.HorizontalTransportModule
+        grid = uniform_curvi_grid(nx = 60, ny = 6, nz = 2, dx = 100.0, dy = 100.0)
+        ng = grid.ng
+
+        @testset "uniform field & zero-velocity invariance" begin
+            # Constant field is preserved exactly (balanced fluxes), cr < 1.
+            s = initialize_state(grid, (:C,)); s.tracers[:C] .= 3.0; s.u .= 0.7; s.v .= 0.0
+            out = fill(-1.0, size(s.tracers[:C]))
+            Hmod.advect_x_ffsl!(out, s.tracers[:C], s, grid, 50.0, 0.0)
+            @test all(isapprox.(out[ng+1:grid.nx+ng, ng+1:grid.ny+ng, :], 3.0))
+            # Zero velocity -> field unchanged.
+            s2 = initialize_state(grid, (:C,)); s2.tracers[:C][ng+10, ng+3, 1] = 5.0
+            s2.u .= 0.0; s2.v .= 0.0
+            out2 = fill(-1.0, size(s2.tracers[:C]))
+            Hmod.advect_x_ffsl!(out2, s2.tracers[:C], s2, grid, 50.0, 0.0)
+            @test out2[ng+10, ng+3, 1] ≈ 5.0
+            @test out2[ng+9, ng+3, 1] ≈ 0.0
+        end
+
+        @testset "conservation + positivity + peak retention (large Courant)" begin
+            s = initialize_state(grid, (:C,))
+            for i in 1:grid.nx; s.tracers[:C][i+ng, ng+3, 1] = exp(-((i-15)^2)/(2*4.0^2)); end
+            s.u .= 1.0; s.v .= 0.0
+            mass0 = sum(s.tracers[:C] .* grid.volume); peak0 = maximum(s.tracers[:C])
+            for _ in 1:7   # Courant 3 (dt=300, dx=100); plume stays interior
+                Hmod.advect_x_ffsl!(s._buffer1[:C], s.tracers[:C], s, grid, 300.0, 0.0)
+                copyto!(s.tracers[:C], s._buffer1[:C])
+            end
+            @test sum(s.tracers[:C] .* grid.volume) ≈ mass0 rtol = 1e-9    # conservative (FP-limited by C<->mass volume round-trip)
+            @test minimum(s.tracers[:C]) >= -1e-12                          # positive (FCT)
+            @test maximum(s.tracers[:C]) <= peak0 + 1e-9                     # no overshoot
+            @test maximum(s.tracers[:C]) > 0.7 * peak0                       # peak preserved (low diffusion)
+        end
+
+        @testset "gradient-CFL term" begin
+            s = initialize_state(grid, (:C,)); s.u .= 0.0; s.v .= 0.0
+            @test calculate_max_gradient_cfl_term(s, grid) == 0.0
+            for i in axes(s.u, 1); s.u[i, :, :] .= Float64(i); end   # du/dx = 1 -> term = pm = 1/100
+            @test calculate_max_gradient_cfl_term(s, grid) ≈ 0.01
+        end
+
+        @testset "end-to-end :FFSL (fixed + adaptive)" begin
+            mktempdir() do dir
+                path = write_synthetic_nc(joinpath(dir, "ffsl.nc"))
+                g = initialize_curvilinear_grid(path); hydro = create_hydrodynamic_data_from_file(path)
+                sources = [PointSource(i = 4, j = 3, k = g.nz, tracer_name = :T, influx_rate = t -> 1.0e3)]
+                ds = NCDataset(path); state = initialize_state(g, ds, (:T,))
+                final = run_simulation(g, state, sources, 0.0, 600.0, 60.0;
+                                       ds = ds, hydro_data = hydro, advection_scheme = :FFSL)
+                @test !any(isnan, final.tracers[:T])
+                @test minimum(final.tracers[:T]) >= -1e-9        # positive
+                @test sum(final.tracers[:T]) > 0.0
+                close(ds)
+                # gradient-CFL-aware adaptive dt completes.
+                ds = NCDataset(path); state = initialize_state(g, ds, (:T,))
+                final2 = run_simulation(g, state, sources, 0.0, 600.0, 60.0;
+                                        ds = ds, hydro_data = hydro, advection_scheme = :FFSL,
+                                        use_adaptive_dt = true, cfl_max = 0.8, dt_max = 300.0, dt_min = 1.0)
+                @test !any(isnan, final2.tracers[:T])
+                @test final2.time >= 600.0 - 1e-6
+                close(ds)
+            end
+        end
+    end
+
 end

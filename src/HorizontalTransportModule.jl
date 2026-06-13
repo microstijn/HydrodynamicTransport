@@ -52,7 +52,7 @@ end
 
 function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
     Kh = 1.0
-    if scheme == :TVD || scheme == :UP3
+    if scheme == :TVD || scheme == :UP3 || scheme == :FFSL
         # Tracers are independent -> parallelize over them (one tracer per core, each with its
         # own scratch flux buffers). The per-tracer kernels run serially, which keeps cache
         # locality and issues a single thread barrier per step. Bit-identical to the serial loop.
@@ -73,6 +73,9 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
                 if scheme == :TVD
                     advect_x_tvd!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
                     advect_y_tvd!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
+                elseif scheme == :FFSL
+                    advect_x_ffsl!(C_intermediate, C_initial, state, grid, dt, D_crit)
+                    advect_y_ffsl!(C_initial, C_intermediate, state, grid, dt, D_crit)
                 else
                     advect_x_up3!(C_intermediate, C_initial, state, grid, dt, fx, D_crit)
                     advect_y_up3!(C_initial, C_intermediate, state, grid, dt, fy, D_crit)
@@ -489,6 +492,204 @@ function advect_y_tvd!(C_out, C_in, state::State, grid::AbstractGrid, dt, fluxes
                 flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
                 C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
             end
+        end
+    end
+end
+
+# ==============================================================================
+# --- SCHEME: Flux-Form Semi-Lagrangian (Lin-Rood) ---
+# Conservative, shape-preserving (monotone PPM), large-Courant-capable horizontal advection.
+# Mass (C * volume) is updated by face fluxes that integrate a monotone parabolic reconstruction
+# over the upstream "departure interval" (may span several cells when Courant > 1). Conservation
+# is exact by construction (each face flux telescopes between its two neighbours). The CFL limit
+# is removed, so dt is bounded by accuracy rather than stability.
+# ==============================================================================
+
+# Integral of the PPM parabola over the rightmost / leftmost fraction `f` of a cell.
+@inline _ffsl_fr(cl, cr, cm, f) = (d = cr - cl; a6 = 6.0*(cm - 0.5*(cl+cr)); f*(cr - 0.5*f*(d - a6*(1.0 - (2.0/3.0)*f))))
+@inline _ffsl_fl(cl, cr, cm, f) = (d = cr - cl; a6 = 6.0*(cm - 0.5*(cl+cr)); f*(cl + 0.5*f*(d + a6*(1.0 - (2.0/3.0)*f))))
+
+# Monotone PPM edge values for q[1:m] (4th-order face value, edge-monotonized + Colella-Woodward
+# limiter -> strictly monotone, positivity-preserving). Writes cL, cR (per-cell left/right edges).
+function _ffsl_ppm_edges!(cL::Vector{Float64}, cR::Vector{Float64}, q::Vector{Float64}, m::Int)
+    @inbounds for f in 1:m
+        jm1 = f > 1 ? f-1 : 1; jp1 = f < m ? f+1 : m; jp2 = f+2 <= m ? f+2 : m
+        aface = (7.0/12.0)*(q[f] + q[jp1]) - (1.0/12.0)*(q[jm1] + q[jp2])  # value at face f+1/2
+        lo = min(q[f], q[jp1]); hi = max(q[f], q[jp1])
+        aface = aface < lo ? lo : (aface > hi ? hi : aface)               # edge monotonization
+        cR[f] = aface
+        cL[jp1] = aface
+    end
+    @inbounds cL[1] = q[1]; cR[m] = q[m]
+    @inbounds for f in 1:m
+        cl = cL[f]; cr = cR[f]; cm = q[f]
+        if (cr - cm) * (cm - cl) <= 0.0
+            cl = cm; cr = cm                                              # local extremum -> flat
+        else
+            d = cr - cl
+            if d * (cm - 0.5*(cl + cr)) >  d*d/6.0;  cl = 3cm - 2cr;  end
+            if d * (cm - 0.5*(cl + cr)) < -d*d/6.0;  cr = 3cm - 2cl;  end
+        end
+        cL[f] = cl; cR[f] = cr
+    end
+    return nothing
+end
+
+# Time-integrated MASS flux across face `f` (between cells f and f+1), Courant `cr` (cells, any
+# magnitude/sign). The mixing ratio `C` is reconstructed/limited (monotone in C), and mass is
+# obtained by weighting with the cell volume `V` (whole cells contribute C*V; the fractional
+# donor contributes V * ∫C). Reconstructing C (not C*V) keeps C monotone where V varies sharply.
+# Cells outside [1,m] contribute zero (no inflow through the open boundary).
+@inline function _ffsl_face_flux(cL, cR, C, V, m::Int, f::Int, cr::Float64)
+    cr == 0.0 && return 0.0
+    if cr > 0.0
+        K = floor(Int, cr); frac = cr - K
+        s = 0.0
+        @inbounds for mm in 0:K-1
+            idx = f - mm
+            (1 <= idx <= m) && (s += C[idx] * V[idx])
+        end
+        jf = f - K
+        (1 <= jf <= m) && (s += V[jf] * _ffsl_fr(cL[jf], cR[jf], C[jf], frac))
+        return s
+    else
+        crp = -cr; K = floor(Int, crp); frac = crp - K
+        s = 0.0
+        @inbounds for mm in 1:K
+            idx = f + mm
+            (1 <= idx <= m) && (s += C[idx] * V[idx])
+        end
+        jf = f + K + 1
+        (1 <= jf <= m) && (s += V[jf] * _ffsl_fl(cL[jf], cR[jf], C[jf], frac))
+        return -s
+    end
+end
+
+# Low-order (donor-cell, first-order) MASS flux across face `f`. Same whole-cell sum as the PPM
+# flux; the fractional donor uses the cell mean instead of the parabola. Used as the monotone
+# FCT base, so the antidiffusive flux (PPM - donor) is purely the sub-grid correction.
+@inline function _ffsl_face_flux_low(C, V, m::Int, f::Int, cr::Float64)
+    cr == 0.0 && return 0.0
+    if cr > 0.0
+        K = floor(Int, cr); frac = cr - K; s = 0.0
+        @inbounds for mm in 0:K-1
+            idx = f - mm; (1 <= idx <= m) && (s += C[idx]*V[idx])
+        end
+        jf = f - K; (1 <= jf <= m) && (s += V[jf]*C[jf]*frac)
+        return s
+    else
+        crp = -cr; K = floor(Int, crp); frac = crp - K; s = 0.0
+        @inbounds for mm in 1:K
+            idx = f + mm; (1 <= idx <= m) && (s += C[idx]*V[idx])
+        end
+        jf = f + K + 1; (1 <= jf <= m) && (s += V[jf]*C[jf]*frac)
+        return -s
+    end
+end
+
+# One conservative Zalesak-FCT flux-form SL sweep along a line of `m` cells (incl. ghosts):
+# monotone donor-cell base + PPM antidiffusive correction limited to the local neighbour
+# min/max. Positivity- and monotonicity-preserving at ANY Courant (degrades gracefully to the
+# donor-cell scheme where the gradient-CFL is violated). Conservative (face fluxes telescope).
+# `crf[f]` = Courant at face f|f+1; writes the updated mixing ratio for physical cells into `cnew`.
+function _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m::Int, ng::Int, nphys::Int)
+    _ffsl_ppm_edges!(cL, cR, crow, m)
+    @inbounds for f in 1:m-1
+        cr = crf[f]
+        Flo[f] = _ffsl_face_flux_low(crow, vrow, m, f, cr)
+        Fhi[f] = _ffsl_face_flux(cL, cR, crow, vrow, m, f, cr)
+    end
+    @inbounds Flo[m] = 0.0; Fhi[m] = 0.0
+    @inbounds for g in 2:m-1
+        Ctd[g] = crow[g] - (Flo[g] - Flo[g-1]) / vrow[g]   # low-order (monotone) update
+    end
+    @inbounds Ctd[1] = crow[1]; Ctd[m] = crow[m]
+    @inbounds for g in 2:m-1
+        cmax = max(crow[g-1], crow[g], crow[g+1], Ctd[g-1], Ctd[g], Ctd[g+1])
+        cmin = min(crow[g-1], crow[g], crow[g+1], Ctd[g-1], Ctd[g], Ctd[g+1])
+        AL = Fhi[g-1] - Flo[g-1]; AR = Fhi[g] - Flo[g]
+        Pp = max(0.0, AL) + max(0.0, -AR)
+        Pm = max(0.0, AR) + max(0.0, -AL)
+        Qp = (cmax - Ctd[g]) * vrow[g]
+        Qm = (Ctd[g] - cmin) * vrow[g]
+        Rp[g] = Pp > 0.0 ? min(1.0, Qp/Pp) : 0.0
+        Rm[g] = Pm > 0.0 ? min(1.0, Qm/Pm) : 0.0
+    end
+    @inbounds Rp[1]=0.0; Rm[1]=0.0; Rp[m]=0.0; Rm[m]=0.0
+    @inbounds for ip in 1:nphys
+        g = ip + ng
+        AR = Fhi[g] - Flo[g]; AL = Fhi[g-1] - Flo[g-1]
+        cR_lim = AR >= 0.0 ? min(Rp[g+1], Rm[g]) : min(Rp[g], Rm[g+1])
+        cL_lim = AL >= 0.0 ? min(Rp[g], Rm[g-1]) : min(Rp[g-1], Rm[g])
+        cnew[g] = Ctd[g] - (cR_lim*AR - cL_lim*AL) / vrow[g]
+    end
+    return nothing
+end
+
+# x-sweep: conservative FCT flux-form SL along i. Serial (parallelism is over tracers in
+# horizontal_transport!). C_out and C_in are full padded arrays.
+function advect_x_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    m = nx + 2*ng
+    u = state.u
+    crow = Vector{Float64}(undef, m); vrow = Vector{Float64}(undef, m); cnew = Vector{Float64}(undef, m)
+    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m); crf = zeros(Float64, m)
+    Flo = Vector{Float64}(undef, m); Fhi = Vector{Float64}(undef, m); Ctd = Vector{Float64}(undef, m)
+    Rp = Vector{Float64}(undef, m); Rm = Vector{Float64}(undef, m)
+    @inbounds for k in axes(C_in, 3), j_phys in 1:ny
+        jg = j_phys + ng
+        for ig in 1:m
+            crow[ig] = C_in[ig, jg, k]; vrow[ig] = grid.volume[ig, jg, k]
+        end
+        # Face Courant (face between cell ig and ig+1 has velocity u[ig+1]); block dry/land faces.
+        for ig in 1:m-1
+            uf = u[ig+1, jg, k]; blocked = false
+            if isa(grid, CurvilinearGrid)
+                d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
+                d2 = grid.h[ig+1, jg] + state.zeta[ig+1, jg, k]
+                blocked = !grid.mask_u[ig+1, jg] || d1 < D_crit || d2 < D_crit
+            end
+            crf[ig] = blocked ? 0.0 : uf * dt / get_dx_at_face(grid, ig+1, jg)
+        end
+        crf[m] = 0.0
+        _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m, ng, nx)
+        for i_phys in 1:nx
+            g = i_phys + ng
+            C_out[g, jg, k] = cnew[g]
+        end
+    end
+end
+
+# y-sweep: conservative FCT flux-form SL along j.
+function advect_y_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_crit::Float64)
+    nx, ny, _ = get_grid_dims(grid)
+    ng = grid.ng
+    m = ny + 2*ng
+    v = state.v
+    crow = Vector{Float64}(undef, m); vrow = Vector{Float64}(undef, m); cnew = Vector{Float64}(undef, m)
+    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m); crf = zeros(Float64, m)
+    Flo = Vector{Float64}(undef, m); Fhi = Vector{Float64}(undef, m); Ctd = Vector{Float64}(undef, m)
+    Rp = Vector{Float64}(undef, m); Rm = Vector{Float64}(undef, m)
+    @inbounds for k in axes(C_in, 3), i_phys in 1:nx
+        ig = i_phys + ng
+        for jg in 1:m
+            crow[jg] = C_in[ig, jg, k]; vrow[jg] = grid.volume[ig, jg, k]
+        end
+        for jg in 1:m-1
+            vf = v[ig, jg+1, k]; blocked = false
+            if isa(grid, CurvilinearGrid)
+                d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
+                d2 = grid.h[ig, jg+1] + state.zeta[ig, jg+1, k]
+                blocked = !grid.mask_v[ig, jg+1] || d1 < D_crit || d2 < D_crit
+            end
+            crf[jg] = blocked ? 0.0 : vf * dt / get_dy_at_face(grid, ig, jg+1)
+        end
+        crf[m] = 0.0
+        _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m, ng, ny)
+        for j_phys in 1:ny
+            g = j_phys + ng
+            C_out[ig, g, k] = cnew[g]
         end
     end
 end

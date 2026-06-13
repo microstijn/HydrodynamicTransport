@@ -61,6 +61,12 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
         nchunks = max(1, min(Threads.nthreads(), ntr))
         _ensure_flux_pools!(state, nchunks)
 
+        # FFSL: the face Courant is tracer-independent -> compute it once here (into the unused
+        # state.flux_x/flux_y scratch) instead of repeating it inside every tracer's sweep.
+        if scheme == :FFSL
+            _compute_face_courant!(state, grid, dt, D_crit)
+        end
+
         Threads.@threads for cid in 1:nchunks
             fx = state.flux_x_pool[cid]
             fy = state.flux_y_pool[cid]
@@ -595,7 +601,7 @@ end
 function _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m::Int, ng::Int, nphys::Int)
     _ffsl_ppm_edges!(cL, cR, crow, m)
     @inbounds for f in 1:m-1
-        cr = crf[f]
+        cr = Float64(crf[f])   # crf may be a Float32 view (precomputed Courant)
         Flo[f] = _ffsl_face_flux_low(crow, vrow, m, f, cr)
         Fhi[f] = _ffsl_face_flux(cL, cR, crow, vrow, m, f, cr)
     end
@@ -626,15 +632,55 @@ function _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m::In
     return nothing
 end
 
+# Precompute the per-face Courant numbers ONCE per step. These depend only on the velocity /
+# free-surface / geometry (not on the tracer), so computing them inside the per-tracer FFSL loop
+# repeats identical work + reads of the Float64 u/zeta/mask arrays n_tracers times. Stored into the
+# otherwise-unused `state.flux_x`/`flux_y` scratch (Float32; the FFSL path uses per-task flux pools,
+# so these struct fields are free here). `flux_x[ig,jg,k]` = x-face Courant after cell ig (face
+# ig|ig+1); `flux_y[ig,jg,k]` = y-face Courant after cell jg. Dry/land faces -> 0.
+function _compute_face_courant!(state::State, grid::AbstractGrid, dt::Float64, D_crit::Float64)
+    nx, ny, nz = get_grid_dims(grid)
+    ng = grid.ng; mx = nx + 2*ng; my = ny + 2*ng
+    u = state.u; v = state.v; cx = state.flux_x; cy = state.flux_y
+    curvi = isa(grid, CurvilinearGrid)
+    Threads.@threads for k in 1:nz
+        @inbounds for jg in 1:my
+            for ig in 1:mx-1
+                uf = u[ig+1, jg, k]; blocked = false
+                if curvi
+                    d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
+                    d2 = grid.h[ig+1, jg] + state.zeta[ig+1, jg, k]
+                    blocked = !grid.mask_u[ig+1, jg] || d1 < D_crit || d2 < D_crit
+                end
+                cx[ig, jg, k] = blocked ? 0.0f0 : Float32(uf * dt / get_dx_at_face(grid, ig+1, jg))
+            end
+            cx[mx, jg, k] = 0.0f0
+        end
+        @inbounds for ig in 1:mx
+            for jg in 1:my-1
+                vf = v[ig, jg+1, k]; blocked = false
+                if curvi
+                    d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
+                    d2 = grid.h[ig, jg+1] + state.zeta[ig, jg+1, k]
+                    blocked = !grid.mask_v[ig, jg+1] || d1 < D_crit || d2 < D_crit
+                end
+                cy[ig, jg, k] = blocked ? 0.0f0 : Float32(vf * dt / get_dy_at_face(grid, ig, jg+1))
+            end
+            cy[ig, my, k] = 0.0f0
+        end
+    end
+    return nothing
+end
+
 # x-sweep: conservative FCT flux-form SL along i. Serial (parallelism is over tracers in
-# horizontal_transport!). C_out and C_in are full padded arrays.
+# horizontal_transport!); the face Courant is read from `state.flux_x` (precomputed once per step
+# by `_compute_face_courant!`). C_out and C_in are full padded arrays.
 function advect_x_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     m = nx + 2*ng
-    u = state.u
     crow = Vector{Float64}(undef, m); vrow = Vector{Float64}(undef, m); cnew = Vector{Float64}(undef, m)
-    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m); crf = zeros(Float64, m)
+    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m)
     Flo = Vector{Float64}(undef, m); Fhi = Vector{Float64}(undef, m); Ctd = Vector{Float64}(undef, m)
     Rp = Vector{Float64}(undef, m); Rm = Vector{Float64}(undef, m)
     @inbounds for k in axes(C_in, 3), j_phys in 1:ny
@@ -642,17 +688,7 @@ function advect_x_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_cri
         for ig in 1:m
             crow[ig] = C_in[ig, jg, k]; vrow[ig] = grid.volume[ig, jg, k]
         end
-        # Face Courant (face between cell ig and ig+1 has velocity u[ig+1]); block dry/land faces.
-        for ig in 1:m-1
-            uf = u[ig+1, jg, k]; blocked = false
-            if isa(grid, CurvilinearGrid)
-                d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
-                d2 = grid.h[ig+1, jg] + state.zeta[ig+1, jg, k]
-                blocked = !grid.mask_u[ig+1, jg] || d1 < D_crit || d2 < D_crit
-            end
-            crf[ig] = blocked ? 0.0 : uf * dt / get_dx_at_face(grid, ig+1, jg)
-        end
-        crf[m] = 0.0
+        crf = view(state.flux_x, 1:m, jg, k)   # precomputed face Courant (tracer-independent)
         _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m, ng, nx)
         for i_phys in 1:nx
             g = i_phys + ng
@@ -661,14 +697,13 @@ function advect_x_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_cri
     end
 end
 
-# y-sweep: conservative FCT flux-form SL along j.
+# y-sweep: conservative FCT flux-form SL along j (face Courant from `state.flux_y`).
 function advect_y_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     m = ny + 2*ng
-    v = state.v
     crow = Vector{Float64}(undef, m); vrow = Vector{Float64}(undef, m); cnew = Vector{Float64}(undef, m)
-    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m); crf = zeros(Float64, m)
+    cL = Vector{Float64}(undef, m); cR = Vector{Float64}(undef, m)
     Flo = Vector{Float64}(undef, m); Fhi = Vector{Float64}(undef, m); Ctd = Vector{Float64}(undef, m)
     Rp = Vector{Float64}(undef, m); Rm = Vector{Float64}(undef, m)
     @inbounds for k in axes(C_in, 3), i_phys in 1:nx
@@ -676,16 +711,7 @@ function advect_y_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_cri
         for jg in 1:m
             crow[jg] = C_in[ig, jg, k]; vrow[jg] = grid.volume[ig, jg, k]
         end
-        for jg in 1:m-1
-            vf = v[ig, jg+1, k]; blocked = false
-            if isa(grid, CurvilinearGrid)
-                d1 = grid.h[ig, jg]   + state.zeta[ig, jg, k]
-                d2 = grid.h[ig, jg+1] + state.zeta[ig, jg+1, k]
-                blocked = !grid.mask_v[ig, jg+1] || d1 < D_crit || d2 < D_crit
-            end
-            crf[jg] = blocked ? 0.0 : vf * dt / get_dy_at_face(grid, ig, jg+1)
-        end
-        crf[m] = 0.0
+        crf = view(state.flux_y, ig, 1:m, k)   # precomputed face Courant (tracer-independent)
         _ffsl_line!(cnew, crow, vrow, crf, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m, ng, ny)
         for j_phys in 1:ny
             g = j_phys + ng

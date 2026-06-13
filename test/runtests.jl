@@ -430,12 +430,14 @@ end
             # Constant field is preserved exactly (balanced fluxes), cr < 1.
             s = initialize_state(grid, (:C,)); s.tracers[:C] .= 3.0; s.u .= 0.7; s.v .= 0.0
             out = fill(-1.0, size(s.tracers[:C]))
+            Hmod._compute_face_courant!(s, grid, 50.0, 0.0)   # face Courant is precomputed per step
             Hmod.advect_x_ffsl!(out, s.tracers[:C], s, grid, 50.0, 0.0)
             @test all(isapprox.(out[ng+1:grid.nx+ng, ng+1:grid.ny+ng, :], 3.0))
             # Zero velocity -> field unchanged.
             s2 = initialize_state(grid, (:C,)); s2.tracers[:C][ng+10, ng+3, 1] = 5.0
             s2.u .= 0.0; s2.v .= 0.0
             out2 = fill(-1.0, size(s2.tracers[:C]))
+            Hmod._compute_face_courant!(s2, grid, 50.0, 0.0)
             Hmod.advect_x_ffsl!(out2, s2.tracers[:C], s2, grid, 50.0, 0.0)
             @test out2[ng+10, ng+3, 1] ≈ 5.0
             @test out2[ng+9, ng+3, 1] ≈ 0.0
@@ -446,6 +448,7 @@ end
             for i in 1:grid.nx; s.tracers[:C][i+ng, ng+3, 1] = exp(-((i-15)^2)/(2*4.0^2)); end
             s.u .= 1.0; s.v .= 0.0
             mass0 = sum(s.tracers[:C] .* grid.volume); peak0 = maximum(s.tracers[:C])
+            Hmod._compute_face_courant!(s, grid, 300.0, 0.0)   # u constant -> compute once
             for _ in 1:7   # Courant 3 (dt=300, dx=100); plume stays interior
                 Hmod.advect_x_ffsl!(s._buffer1[:C], s.tracers[:C], s, grid, 300.0, 0.0)
                 copyto!(s.tracers[:C], s._buffer1[:C])

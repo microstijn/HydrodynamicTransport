@@ -189,6 +189,23 @@ end-to-end ≈ 0.92x of TVD+F64 with strictly better numerics. NOTE: the D1 camp
 campaign, set that column to `FFSL` in `K7_hydro_execution_manifest_v4.csv` — the code default only
 affects callers that don't specify a scheme.
 
+### #6 — FFSL face-Courant precompute  *(~5%; FFSL is compute-bound)*
+
+The per-face Courant numbers are **tracer-independent** (function of velocity / free-surface /
+geometry), but the original FFSL recomputed them inside every tracer's sweep. Now
+`_compute_face_courant!` fills them **once per step** into the otherwise-unused `state.flux_x` /
+`flux_y` scratch (Float32), and `advect_{x,y}_ffsl!` read that instead of recomputing. ~5% per-step
+(real grid, 8 tracers: ~125 → ~118 ms); conservation + positivity unchanged. NOTE: this couples the
+FFSL kernels to the precompute — direct callers (e.g. unit tests) must call `_compute_face_courant!`
+first; `horizontal_transport!` does it automatically.
+
+**Why only ~5%, and why an F32-volume cache gave ~0%:** after Float32 tracers, FFSL is
+**compute-bound in its FCT/PPM limiter** (Zalesak min/max + divisions, parabola reconstruction),
+not bandwidth-bound on the geometry reads. So read-reduction tricks plateau. The real per-step
+lever was already taken (Float32 tracers, #5). Further speed would need cutting the limiter
+arithmetic (risky, touches the numerical core — not worth it) or the cheaper non-positive `:TVD`.
+Bottom line: ~5% banked; FFSL's cost is the price of its positivity + peak fidelity.
+
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 
 A third horizontal advection scheme alongside `:TVD` (default) and `:UP3`: **`:FFSL`**, a

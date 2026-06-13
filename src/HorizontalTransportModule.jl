@@ -43,8 +43,8 @@ function _ensure_flux_pools!(state::State, n::Int)
         resize!(state.flux_x_pool, n)
         resize!(state.flux_y_pool, n)
         for i in 1:n
-            state.flux_x_pool[i] = zeros(size(state.flux_x))
-            state.flux_y_pool[i] = zeros(size(state.flux_y))
+            state.flux_x_pool[i] = zeros(eltype(state.flux_x), size(state.flux_x))
+            state.flux_y_pool[i] = zeros(eltype(state.flux_y), size(state.flux_y))
         end
     end
     return nothing
@@ -109,11 +109,11 @@ end
 
 
 # --- Stencil Functions (inlined for performance) ---
-@inline function get_stencil_x(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
+@inline function get_stencil_x(C::AbstractArray{<:Real, 3}, i_glob::Int, j_glob::Int, k::Int)
     @inbounds return C[i_glob-2, j_glob, k], C[i_glob-1, j_glob, k], C[i_glob, j_glob, k], C[i_glob+1, j_glob, k], C[i_glob+2, j_glob, k]
 end
 
-@inline function get_stencil_y(C::Array{Float64, 3}, i_glob::Int, j_glob::Int, k::Int)
+@inline function get_stencil_y(C::AbstractArray{<:Real, 3}, i_glob::Int, j_glob::Int, k::Int)
     @inbounds return C[i_glob, j_glob-2, k], C[i_glob, j_glob-1, k], C[i_glob, j_glob, k], C[i_glob, j_glob+1, k], C[i_glob, j_glob+2, k]
 end
 
@@ -704,7 +704,7 @@ end
 Performs the first step of the ADI sequence (implicit x-sweep).
 Solves `(I - dt*L_x) * C_intermediate = C_initial` for each row.
 """
-function advect_implicit_x!(C_intermediate::Array{Float64, 3}, C_initial::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+function advect_implicit_x!(C_intermediate::AbstractArray{<:Real, 3}, C_initial::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64)
     nx, ny, nz = get_grid_dims(grid)
     ng = grid.ng
     u = state.u
@@ -756,7 +756,7 @@ end
 Performs the second step of the ADI sequence (implicit y-sweep).
 Solves `(I - dt*L_y) * C_final = C_intermediate` for each column.
 """
-function advect_implicit_y!(C_final::Array{Float64, 3}, C_intermediate::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64)
+function advect_implicit_y!(C_final::AbstractArray{<:Real, 3}, C_intermediate::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64)
     nx, ny, nz = get_grid_dims(grid)
     ng = grid.ng
     v = state.v
@@ -917,7 +917,7 @@ end
 #  3D Implicit Advection-Diffusion (Crank-Nicolson ADI) ---
 # ==============================================================================
 
-function advect_diffuse_implicit_x!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
+function advect_diffuse_implicit_x!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     u = state.u
@@ -974,7 +974,7 @@ function advect_diffuse_implicit_x!(C_out::Array{Float64, 3}, C_in::Array{Float6
     end
 end
 
-function advect_diffuse_implicit_y!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
+function advect_diffuse_implicit_y!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     v = state.v
@@ -1039,7 +1039,7 @@ Performs the x-sweep of advection and diffusion.
 
 This combination ensures a high-order, monotonic, and stable solution.
 """
-function advect_diffuse_tvd_implicit_x!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
+function advect_diffuse_tvd_implicit_x!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     u = state.u
@@ -1166,7 +1166,7 @@ end # end function
 Performs the y-sweep of advection and diffusion using the stable
 TVD (FCT) method combined with Crank-Nicolson diffusion.
 """
-function advect_diffuse_tvd_implicit_y!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
+function advect_diffuse_tvd_implicit_y!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kh::Float64, limiter_func::Function)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
     v = state.v

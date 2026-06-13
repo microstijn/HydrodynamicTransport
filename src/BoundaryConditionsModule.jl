@@ -134,7 +134,7 @@ field at a boundary cell is set to the known physical boundary value for the fin
 solution at the new time step. This prevents the unphysical intermediate variable
 from polluting the second (Y-sweep) step of the ADI solver.
 """
-function apply_intermediate_boundary_conditions!(C_intermediate::Array{Float64, 3}, C_final::Array{Float64, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
+function apply_intermediate_boundary_conditions!(C_intermediate::AbstractArray{<:Real, 3}, C_final::AbstractArray{<:Real, 3}, grid::AbstractGrid, bcs::Vector{<:BoundaryCondition}, tracer_name::Symbol)
     # This function is a placeholder to be implemented correctly.
     # For now, it's a no-op to avoid errors.
 end

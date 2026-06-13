@@ -13,36 +13,36 @@ function initialize_state(grid::CartesianGrid, tracer_names::NTuple{N, Symbol} w
     
     nx_tot, ny_tot = nx + 2*ng, ny + 2*ng
 
-    tracers = Dict{Symbol, Array{Float64, 3}}()
-    buffer1 = Dict{Symbol, Array{Float64, 3}}()
-    buffer2 = Dict{Symbol, Array{Float64, 3}}()
+    tracers = Dict{Symbol, Array{FT, 3}}()
+    buffer1 = Dict{Symbol, Array{FT, 3}}()
+    buffer2 = Dict{Symbol, Array{FT, 3}}()
     for name in tracer_names
-        tracer_arr = zeros(Float64, nx_tot, ny_tot, nz)
+        tracer_arr = zeros(FT, nx_tot, ny_tot, nz)
         tracers[name] = tracer_arr
-        buffer1[name] = zeros(size(tracer_arr))
-        buffer2[name] = zeros(size(tracer_arr))
+        buffer1[name] = zeros(FT, size(tracer_arr))
+        buffer2[name] = zeros(FT, size(tracer_arr))
     end
-    
-    bed_mass = Dict{Symbol, Array{Float64, 2}}()
+
+    bed_mass = Dict{Symbol, Array{FT, 2}}()
     for name in sediment_tracers
-        bed_mass[name] = zeros(Float64, nx_tot, ny_tot)
+        bed_mass[name] = zeros(FT, nx_tot, ny_tot)
     end
 
     u = zeros(Float64, nx_tot + 1, ny_tot, nz)
     v = zeros(Float64, nx_tot, ny_tot + 1, nz)
     w = zeros(Float64, nx_tot, ny_tot, nz + 1)
 
-    flux_x = zeros(size(u))
-    flux_y = zeros(size(v))
-    flux_z = zeros(size(w))
-    
+    flux_x = zeros(FT, size(u))
+    flux_y = zeros(FT, size(v))
+    flux_z = zeros(FT, size(w))
+
     temperature = zeros(Float64, nx_tot, ny_tot, nz)
     salinity = zeros(Float64, nx_tot, ny_tot, nz)
     tss = zeros(Float64, nx_tot, ny_tot, nz)
     uvb = zeros(Float64, nx_tot, ny_tot, nz)
     zeta = zeros(Float64, nx_tot, ny_tot, nz)
 
-    return State(tracers, buffer1, buffer2, u, v, w, zeta, flux_x, flux_y, flux_z, Array{Float64,3}[], Array{Float64,3}[], temperature, salinity, tss, uvb, 0.0, bed_mass)
+    return State(tracers, buffer1, buffer2, u, v, w, zeta, flux_x, flux_y, flux_z, Array{FT,3}[], Array{FT,3}[], temperature, salinity, tss, uvb, 0.0, bed_mass)
 end
 
 function initialize_state(grid::CurvilinearGrid, tracer_names::NTuple{N, Symbol} where N; sediment_tracers::Vector{Symbol}=Symbol[])

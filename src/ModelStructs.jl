@@ -2,7 +2,7 @@
 
 module ModelStructs
 
-export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, HydroSlabCache, PointSource,
+export FT, AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, HydroSlabCache, PointSource,
        BoundaryCondition, OpenBoundary, RiverBoundary, TidalBoundary, FunctionalInteraction,
        SedimentParams, DecayParams, OysterParams, OysterState, VirtualOyster
 
@@ -10,6 +10,13 @@ using StaticArrays
 using Base: @kwdef
 
 abstract type AbstractGrid end
+
+# Storage precision for the tracer / flux / bed-mass fields. Transport is memory-bandwidth-bound,
+# so storing these (the O(n_tracers) bulk that is streamed every step) in Float32 roughly halves
+# the dominant memory traffic for a ~1.5-2x speed-up. The arithmetic is still done in Float64
+# inside the kernels (scratch + intermediates promote); only storage is reduced. Hydro/environment
+# fields (u, v, w, zeta, T, S, ...) stay Float64 — they are read from disk and drive the CFL.
+const FT = Float32
 
 struct CartesianGrid <: AbstractGrid
     ng::Int # Number of ghost cells
@@ -36,22 +43,22 @@ struct CurvilinearGrid <: AbstractGrid
 end
 
 mutable struct State
-    tracers::Dict{Symbol, Array{Float64, 3}}
-    _buffer1::Dict{Symbol, Array{Float64, 3}}  # Renamed from _buffers
-    _buffer2::Dict{Symbol, Array{Float64, 3}}  # NEW: Second buffer for 3-sweep ADI
+    tracers::Dict{Symbol, Array{FT, 3}}
+    _buffer1::Dict{Symbol, Array{FT, 3}}  # Renamed from _buffers
+    _buffer2::Dict{Symbol, Array{FT, 3}}  # NEW: Second buffer for 3-sweep ADI
     u::Array{Float64, 3}; v::Array{Float64, 3}; w::Array{Float64, 3}
     zeta::Array{Float64, 3}
-    flux_x::Array{Float64, 3} # Pre-allocated buffer for x-direction fluxes
-    flux_y::Array{Float64, 3} # Pre-allocated buffer for y-direction fluxes
-    flux_z::Array{Float64, 3} # Pre-allocated buffer for z-direction fluxes
+    flux_x::Array{FT, 3} # Pre-allocated buffer for x-direction fluxes
+    flux_y::Array{FT, 3} # Pre-allocated buffer for y-direction fluxes
+    flux_z::Array{FT, 3} # Pre-allocated buffer for z-direction fluxes
     # Per-task scratch flux buffers for tracer-parallel horizontal transport. Lazily filled
     # (one set per parallel chunk) on first use; reused across steps. Scratch only -> not copied.
-    flux_x_pool::Vector{Array{Float64, 3}}
-    flux_y_pool::Vector{Array{Float64, 3}}
+    flux_x_pool::Vector{Array{FT, 3}}
+    flux_y_pool::Vector{Array{FT, 3}}
     temperature::Array{Float64, 3}; salinity::Array{Float64, 3}
     tss::Array{Float64, 3}; uvb::Array{Float64, 3}
     time::Float64
-    bed_mass::Dict{Symbol, Array{Float64, 2}} # Mass per unit area (kg/m^2)
+    bed_mass::Dict{Symbol, Array{FT, 2}} # Mass per unit area (kg/m^2)
 end
 
 @kwdef struct PointSource

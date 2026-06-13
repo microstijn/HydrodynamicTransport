@@ -193,7 +193,7 @@ end
 # 3D Implicit Advection-Diffusion (Crank-Nicolson ADI) 
 # ==============================================================================
 
-function advect_diffuse_implicit_z!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kz::Float64)
+function advect_diffuse_implicit_z!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kz::Float64)
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     ng = grid.ng
     w = state.w
@@ -266,7 +266,7 @@ end
 # 3D Implicit Advection-Diffusion (TVD) 
 # ==============================================================================
 
-function advect_diffuse_tvd_implicit_z!(C_out::Array{Float64, 3}, C_in::Array{Float64, 3}, state::State, grid::AbstractGrid, dt::Float64, Kz::Float64, limiter_func::Function)
+function advect_diffuse_tvd_implicit_z!(C_out::AbstractArray{<:Real, 3}, C_in::AbstractArray{<:Real, 3}, state::State, grid::AbstractGrid, dt::Float64, Kz::Float64, limiter_func::Function)
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     ng = grid.ng
     w = state.w

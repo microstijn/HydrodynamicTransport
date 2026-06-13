@@ -58,7 +58,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                         virtual_oysters::Vector{VirtualOyster}=Vector{VirtualOyster}(),
                         oyster_tracers::NamedTuple=NamedTuple(),
-                        advection_scheme::Symbol=:TVD,
+                        advection_scheme::Symbol=:FFSL,   # conservative + positive + peak-preserving; ~1.26x TVD here
                         limiter_func::Function=FluxLimitersModule.van_leer, # <-- NEW ARGUMENT
                         Kh::Float64=1.0,
                         Kz::Float64=1e-4,
@@ -252,7 +252,7 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                                   sediment_params::Dict{Symbol, SedimentParams}=Dict{Symbol, SedimentParams}(),
                                   virtual_oysters::Vector{VirtualOyster}=Vector{VirtualOyster}(),
                                   oyster_tracers::NamedTuple=NamedTuple(),
-                                  advection_scheme::Symbol=:TVD,
+                                  advection_scheme::Symbol=:FFSL,
                                   limiter_func::Function=FluxLimitersModule.van_leer, # <-- NEW ARGUMENT
                                   Kh::Float64=1.0,
                                   Kz::Float64=1e-4,

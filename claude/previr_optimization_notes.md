@@ -157,6 +157,38 @@ first that catches it — **`:FFSL` needs no `min_depth`**, so it stays the robu
 estuary channels. (Plausibly the same pathological-thin-cell family behind the campaign `dt~1s`,
 Roadmap #1.)
 
+## #5 — Float32 tracer storage  *(memory-bandwidth lever; ~1.5x)* + `:FFSL` as default
+
+Transport is memory-bandwidth-bound, so the lever is **bytes streamed per step**, not the scheme
+or `dt` (which is fixed at ~60 s, velocity-CFL-bound — see RESOLVED above; there is no `dt` lever).
+
+**Float32 tracer storage** (`ModelStructs.FT = Float32`): the per-tracer arrays streamed every step
+— `tracers`, `_buffer1/2`, `flux_x/y/z`, `flux_*_pool`, `bed_mass` — are stored in Float32, halving
+their memory traffic. **Arithmetic stays Float64** (kernel scratch + intermediates promote; only
+storage is reduced). Hydro/environment fields (`u,v,w,zeta,T,S,tss,uvb`) and all grid metrics stay
+Float64. Tracer-array function signatures relaxed `Array{Float64,3}` → `AbstractArray{<:Real,3}`.
+
+- **Speed (real grid, 8 tracers, 8 threads):** per-step horizontal `TVD 162→105 ms (1.54x)`,
+  `FFSL 172→125 ms (1.38x)`, vertical `→38 ms`. Not the full 2x because the F64 velocity/metric
+  arrays are still streamed.
+- **Accuracy (real FFSL run, sources incl. far-upstream):** F32 vs an F64 build agree to **~1e-6
+  relative** (mass/inj identical to 5 digits, maxC/sumC to ~6 digits); strictly positive in both.
+  Negligible for unit-release kernels. Flip `FT = Float64` in `ModelStructs.jl` to opt out.
+- **Caveat:** `.jld2` state outputs now store Float32 tracer fields (downstream E-stages read +
+  normalize, so fine, but it's a format change). `validate_optim.jl` is no longer bit-comparable
+  to the F64 baseline (F32 by design) — treat it as a sanity check, not a bit-identical regression.
+
+**`:FFSL` is now the default `advection_scheme`** in `run_simulation` / `run_and_store_simulation`
+/ `estimate_stable_timestep` (was `:TVD`). Benchmarked at only **~1.26x TVD end-to-end** here
+(per-step 1.06x — the extra PPM+FCT work hides under the bandwidth wall — × dt 1.19x from the
+slightly tighter gradient-CFL), and it is conservative + strictly positive + peak-preserving,
+whereas TVD produced large negative undershoots (`minC~-3.5e8`) at the sharp upstream releases.
+Combined, **`:FFSL`+Float32 per-step (125 ms) is *faster* than the old `:TVD`+Float64 (162 ms)**;
+end-to-end ≈ 0.92x of TVD+F64 with strictly better numerics. NOTE: the D1 campaign passes
+`advection_scheme` explicitly from the execution manifest (still `TVD`); to adopt `:FFSL` for the
+campaign, set that column to `FFSL` in `K7_hydro_execution_manifest_v4.csv` — the code default only
+affects callers that don't specify a scheme.
+
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 
 A third horizontal advection scheme alongside `:TVD` (default) and `:UP3`: **`:FFSL`**, a

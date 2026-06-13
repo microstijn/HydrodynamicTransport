@@ -173,8 +173,8 @@ time window. To check the full time window (slower but more accurate), set `time
 - `CFL_acc`: For implicit schemes, the desired "accuracy Courant number" to base the recommendation on (e.g., 5.0).
 - `time_samples`: Number of time steps to sample for velocity checks. `nothing` scans the entire specified time window.
 """
-function estimate_stable_timestep(hydro_data::HydrodynamicData; 
-                                 advection_scheme::Symbol=:TVD,
+function estimate_stable_timestep(hydro_data::HydrodynamicData;
+                                 advection_scheme::Symbol=:FFSL,
                                  start_time::Union{Float64, Nothing}=nothing,
                                  end_time::Union{Float64, Nothing}=nothing,
                                  dx_var::String="dx", 
@@ -257,7 +257,7 @@ function estimate_stable_timestep(hydro_data::HydrodynamicData;
     end
 
     cfl_denominator = (u_max / dx_min + v_max / dy_min)
-    if advection_scheme in (:TVD, :UP3)
+    if advection_scheme in (:TVD, :UP3, :FFSL)
         recommended_dt = (1 / cfl_denominator) * safety_factor
         println("--------------------------------------------------")
         println("Recommended STABLE timestep (dt): $(round(recommended_dt, digits=2)) seconds")

@@ -853,88 +853,105 @@ enforced at land boundaries by checking the grid mask.
 # Returns
 - `nothing`: Modifies `C_out` in-place.
 """
+# `fluxes_x` is retained for signature compatibility (TVD/UP3/ADI callers pass a pool buffer)
+# but is UNUSED: the diffusive x-flux is computed in a per-row Float64 scratch vector and consumed
+# immediately by the divergence, avoiding the full-array zero/write/read-back of a 3-D flux buffer
+# (~3 extra 4.7 MB passes/tracer). Numerically bit-identical to the buffer version.
 function diffuse_x!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_x, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
-    fluxes_x .= 0.0
+    m = nx + 2*ng
+    fxrow = Vector{Float64}(undef, m)   # per-row x-face flux scratch (face f sits between cells f-1,f)
+    curvi = isa(grid, CurvilinearGrid)
 
-    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
     # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
     @inbounds for k in axes(C_in, 3)
-        for j_phys in 1:ny, i_phys in 2:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
-
-            local flux = 0.0
-            # --- Cell-Face Blocking Logic for Diffusion ---
-            if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
-                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
-                if depth1 < D_crit || depth2 < D_crit
-                    flux = 0.0
-                else
+        for j_phys in 1:ny
+            j_glob = j_phys + ng
+            fxrow[ng+1] = 0.0; fxrow[ng+nx+1] = 0.0   # zero-flux boundary faces (i_phys 1 and nx+1)
+            for i_phys in 2:nx
+                i_glob = i_phys + ng
+                flux = 0.0
+                # --- Cell-Face Blocking Logic for Diffusion ---
+                if curvi
+                    depth1 = grid.h[i_glob-1, j_glob] + state.zeta[i_glob-1, j_glob, k]
+                    depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
+                    if depth1 < D_crit || depth2 < D_crit
+                        flux = 0.0
+                    else
+                        dx = get_dx_centers(grid, i_glob, j_glob)
+                        dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
+                        flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+                    end
+                else # CartesianGrid (no blocking)
                     dx = get_dx_centers(grid, i_glob, j_glob)
                     dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
                     flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
                 end
-            else # Original logic for CartesianGrid or when not using blocking
-                dx = get_dx_centers(grid, i_glob, j_glob)
-                dCdx = (C_in[i_glob, j_glob, k] - C_in[i_glob-1, j_glob, k]) / dx
-                flux = -Kh * grid.face_area_x[i_glob, j_glob, k] * dCdx
+                face_is_wet = curvi ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
+                fxrow[i_glob] = flux * face_is_wet
             end
-
-            face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_u[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob-1, j_glob, k])
-            fluxes_x[i_glob, j_glob, k] = flux * face_is_wet
-        end
-    end
-
-    @inbounds for k in axes(C_out, 3)
-        for j_phys in 1:ny, i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
-            flux_divergence = fluxes_x[i_glob+1, j_glob, k] - fluxes_x[i_glob, j_glob, k]
-            C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            for i_phys in 1:nx
+                i_glob = i_phys + ng
+                flux_divergence = fxrow[i_glob+1] - fxrow[i_glob]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
         end
     end
 end
 
+# `fluxes_y` retained for signature compatibility but UNUSED (see diffuse_x!). Uses a rolling
+# 2-row flux scratch (`face_lo`/`face_hi`, each a full i-row) so the y-face flux + divergence both
+# iterate i-inner (contiguous in column-major memory) — avoiding both the full 3-D flux buffer AND
+# the strided per-column access a naive `j`-inner scratch would incur. Bit-identical math.
 function diffuse_y!(C_out, C_in, state::State, grid::AbstractGrid, dt, Kh, fluxes_y, D_crit::Float64)
     nx, ny, _ = get_grid_dims(grid)
     ng = grid.ng
-    fluxes_y .= 0.0
+    mx = nx + 2*ng
+    face_lo = zeros(Float64, mx)   # y-flux at the current cell-row's bottom face (face j_glob)
+    face_hi = Vector{Float64}(undef, mx)   # ... top face (face j_glob+1)
+    curvi = isa(grid, CurvilinearGrid)
 
-    # Calculate fluxes only for interior faces, enforcing zero-flux at boundaries.
     # Serial over k: parallelism comes from the tracer-level threads in horizontal_transport!.
+    # Sweep faces f = ng+1 .. ng+ny+1 (face f sits between cell-rows f-1 and f); after computing
+    # the flux at face f we can finalize cell-row f-1 (bottom = face_lo at f-1, top = face_hi at f).
     @inbounds for k in axes(C_in, 3)
-        for j_phys in 2:ny, i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
-
-            local flux = 0.0
-            # --- Cell-Face Blocking Logic for Diffusion ---
-            if isa(grid, CurvilinearGrid)
-                depth1 = grid.h[i_glob, j_glob-1] + state.zeta[i_glob, j_glob-1, k]
-                depth2 = grid.h[i_glob, j_glob]   + state.zeta[i_glob, j_glob, k]
-                if depth1 < D_crit || depth2 < D_crit
+        # face ng+1 is the bottom domain boundary -> zero flux
+        for i_glob in 1:mx; face_lo[i_glob] = 0.0; end
+        for f in (ng+2):(ng+ny+1)
+            if f <= ng + ny      # interior face between cell-rows f-1 and f
+                for i_phys in 1:nx
+                    i_glob = i_phys + ng
                     flux = 0.0
-                else
-                    dy = get_dy_centers(grid, i_glob, j_glob)
-                    dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
-                    flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+                    if curvi
+                        depth1 = grid.h[i_glob, f-1] + state.zeta[i_glob, f-1, k]
+                        depth2 = grid.h[i_glob, f]   + state.zeta[i_glob, f, k]
+                        if depth1 < D_crit || depth2 < D_crit
+                            flux = 0.0
+                        else
+                            dy = get_dy_centers(grid, i_glob, f)
+                            dCdy = (C_in[i_glob, f, k] - C_in[i_glob, f-1, k]) / dy
+                            flux = -Kh * grid.face_area_y[i_glob, f, k] * dCdy
+                        end
+                    else # CartesianGrid (no blocking)
+                        dy = get_dy_centers(grid, i_glob, f)
+                        dCdy = (C_in[i_glob, f, k] - C_in[i_glob, f-1, k]) / dy
+                        flux = -Kh * grid.face_area_y[i_glob, f, k] * dCdy
+                    end
+                    face_is_wet = curvi ? grid.mask_v[i_glob, f] : (grid.mask[i_glob, f, k] & grid.mask[i_glob, f-1, k])
+                    face_hi[i_glob] = flux * face_is_wet
                 end
-            else # Original logic for CartesianGrid or when not using blocking
-                dy = get_dy_centers(grid, i_glob, j_glob)
-                dCdy = (C_in[i_glob, j_glob, k] - C_in[i_glob, j_glob-1, k]) / dy
-                flux = -Kh * grid.face_area_y[i_glob, j_glob, k] * dCdy
+            else                 # f == ng+ny+1: top domain boundary -> zero flux
+                for i_phys in 1:nx; face_hi[i_phys + ng] = 0.0; end
             end
-
-            face_is_wet = isa(grid, CurvilinearGrid) ? grid.mask_v[i_glob, j_glob] : (grid.mask[i_glob, j_glob, k] & grid.mask[i_glob, j_glob-1, k])
-            fluxes_y[i_glob, j_glob, k] = flux * face_is_wet
-        end
-    end
-
-    @inbounds for k in axes(C_out, 3)
-        for j_phys in 1:ny, i_phys in 1:nx
-            i_glob, j_glob = i_phys + ng, j_phys + ng
-            flux_divergence = fluxes_y[i_glob, j_glob+1, k] - fluxes_y[i_glob, j_glob, k]
-            C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            # finalize cell-row j_glob = f-1 (physical): divergence = face_hi(top) - face_lo(bottom)
+            j_glob = f - 1
+            for i_phys in 1:nx
+                i_glob = i_phys + ng
+                flux_divergence = face_hi[i_glob] - face_lo[i_glob]
+                C_out[i_glob, j_glob, k] = C_in[i_glob, j_glob, k] - (dt / grid.volume[i_glob, j_glob, k]) * flux_divergence
+            end
+            face_lo, face_hi = face_hi, face_lo   # roll: this top face becomes the next row's bottom
         end
     end
 end

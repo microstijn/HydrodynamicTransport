@@ -219,7 +219,7 @@ diffusion-only-no-advection (the price of the missing physics). 110/110 tests pa
 isolated cells still show large single-step uniform-tracer distortion (max ~0.98) from horizontal
 FFSL on the steep sigma grid — present with w≡0 too, i.e. not caused by the diagnosis.
 
-### #6 — FFSL face-Courant precompute  *(~5%; FFSL is compute-bound)*
+### #6 — FFSL face-Courant precompute  *(~5%)*  ⚠ see #7: "compute-bound" claim below is WRONG
 
 The per-face Courant numbers are **tracer-independent** (function of velocity / free-surface /
 geometry), but the original FFSL recomputed them inside every tracer's sweep. Now
@@ -235,6 +235,75 @@ not bandwidth-bound on the geometry reads. So read-reduction tricks plateau. The
 lever was already taken (Float32 tracers, #5). Further speed would need cutting the limiter
 arithmetic (risky, touches the numerical core — not worth it) or the cheaper non-positive `:TVD`.
 Bottom line: ~5% banked; FFSL's cost is the price of its positivity + peak fidelity.
+
+### #7 — FFSL profiling session (2026-06-13): "compute-bound" was WRONG; no cheap lever remains
+
+A full diagnostic pass on the real CurviLoire grid (`julia +nightly`, 8 threads; scaffolds in
+`claude/audit_ffsl.jl`, `claude/bench_ffsl.jl`, `claude/bench_threads.jl`). Investigated the
+handoff's three hypothesized levers; **all three are dead.** The earlier #4 finding
+("memory-bandwidth-bound at 8 threads") was the correct one — #6's "compute-bound in the FCT/PPM
+limiter" contradicted it and is **refuted by measurement**.
+
+1. **Type-stability (handoff #1): non-issue.** `@code_warntype` on `advect_{x,y}_ffsl!`,
+   `_ffsl_line!`, `_ffsl_ppm_edges!`, `_ffsl_face_flux[_low]`, `_compute_face_courant!` — **all
+   fully type-stable** (`Body::Nothing`/`Float64`, no `::Any`/`Union`/`Box`). Julia specializes on
+   concrete argument types regardless of annotation, so the untyped `C_out,C_in,dt,…` args never
+   boxed. No 10–30% there. (Audit reproducible via `claude/audit_ffsl.jl`.)
+
+2. **Bounds-checks: already elided.** The fractional-donor accesses in `_ffsl_face_flux[_low]` look
+   un-`@inbounds`, but those funcs are `@inline`d into `_ffsl_line!`'s `@inbounds for f` loop, so the
+   context already propagates. Wrapping them in `@inbounds` → **0.0%** (confirmed). Gathering the
+   Courant into a contiguous `Vector{Float64}` row (vs the strided Float32 view) → **regression**
+   (8tr 118→144 ms): the extra gather pass adds more traffic than the cheaper read saves.
+
+3. **It is memory-bandwidth-bound, saturating ~4 threads.** Fixed work (8 tracers), vary threads:
+   `1→401.6, 2→216.8 (1.85×), 4→139.8 (2.87×), 8→115.8 ms (3.47×)`. Marginal 4→8 = **1.21×** — a
+   textbook bandwidth-saturation knee. So the CPU stalls on memory, not the FCT arithmetic; this is
+   exactly why every compute-side micro-opt above moved nothing. (Also caps the #6/threading-rebalance
+   idea: at 20 tracers the 16% `wait()` from the 3,3,3,3,2,2,2,2 chunking is real, but the busy
+   threads are already bandwidth-throttled, so rebalancing the idle won't recover much.)
+
+4. **Float32 geometry (retest of the dismissed lever): not worth it — and now we know WHY.**
+   Converted `grid.volume`+`face_area` to `FT`. Best-of-3: 8tr 114 (vs 118), 20tr 289 (vs 307) =
+   ~3–6%, **buried in ±20% run-to-run noise** (laptop thermal throttling) → reproduces #6's "~0%".
+   AND it breaks the sediment test's `rtol=1e-9` mass-conservation assert (drift ~3.5e-8 from F32
+   `volume` in the `C·V` mass round-trip). Reverted. **Mechanism:** `volume`/`face_area` are
+   **shared, read-only, reused by every tracer within a step** → they stay resident in L3 after the
+   first tracer and are *not* re-streamed from RAM. The actual RAM bottleneck is the **distinct
+   per-tracer** tracer+buffer arrays (read+written ~8× across the 4 sweeps adv_x/adv_y/diff_x/diff_y)
+   — and those are **already Float32** (#5). The Float32-tracer change already captured the lever.
+
+**Conclusion: no cheap *advection* speed-up remains, but diffusion had a real one — see #9.** The
+lever is **cutting distinct per-tracer traffic**. Diffusion turned out to be ~40% of the horizontal
+step and was carrying a wholly-removable full 3-D flux buffer (#9, **done, −14–18%**). Beyond that,
+**fusing the 4 sweeps** (adv+diff per direction → 2) would remove the tracer-field re-read between
+advection and diffusion (~2 more passes) — a deeper refactor (operator-split order; folding diffusion
+into the FCT flux), guarded by the conservation/positivity tests + real-data checksum.
+Baselines (real grid, 8 threads, `julia +nightly`, *pre-#9*): **8 tracers ≈ 118 ms, 20 tracers ≈
+307 ms** per step — expect ±20% noise on this laptop; **always compare best-of-N within ONE process**
+(interleaved A/B), never across separate runs (thermal drift swamps the signal — this is how the
+first naive #9 attempt looked like a regression).
+
+### #9 — Diffusion per-line flux scratch  *(bit-identical; −14% @8tr, −18% @20tr on the horizontal step)*
+
+`diffuse_x!`/`diffuse_y!` materialised the full 3-D diffusive-flux array (`state.flux_*` pool buffer):
+`fill!(0)` + write + read-back = ~3 extra 4.7 MB passes/tracer/direction of pure RAM traffic that the
+FFSL advection (per-line scratch) already avoids. Replaced with per-line scratch consumed immediately
+by the divergence — **no full flux buffer**.
+- `diffuse_x!`: per-**row** scratch (`fxrow`), naturally i-contiguous.
+- `diffuse_y!`: a **rolling 2-row** buffer (`face_lo`/`face_hi`) so flux + divergence both iterate
+  **i-inner (contiguous)**. ⚠ The obvious per-**column** scratch (j-inner) is **strided** in
+  column-major memory and *regressed +17%* — the buffer was never the only cost; contiguity matters
+  as much. The rolling design keeps contiguity AND drops the buffer.
+- **Result (same-process interleaved A/B, real grid, 8 threads):** diffusion alone −48–54%; full
+  horizontal step **−14% (8tr, 134→115 ms), −18% (20tr, 398→325 ms)**.
+- **Correctness:** x bit-identical; y differs 7e-9 because the new Float64 flux scratch skips the old
+  Float32 pool round-trip — i.e. *slightly more* accurate. All 110 unit tests pass (incl. the
+  sediment `rtol=1e-9` mass-conservation assert).
+- The `fluxes_*` arg is retained in the signature (TVD/UP3/ADI call sites unchanged) but unused by the
+  diffusion path. *Optional follow-up:* in the `:FFSL` branch the flux pools are now wholly unused
+  (both advection and diffusion use per-line scratch) — `_ensure_flux_pools!` could be skipped there
+  to drop ~75 MB of idle buffers (memory, not speed). Scaffold: `claude/bench_diff_ab.jl`.
 
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 

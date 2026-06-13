@@ -318,7 +318,8 @@ its diffusion geometry reads (`face_area_y`, `zeta`, `h`, `pn` at fixed i, varyi
 in column-major memory — exactly the access pattern #9's standalone `diffuse_y!` avoids with its
 i-contiguous rolling 2-row buffer. The strided-geometry penalty exceeds the saved tracer-field
 re-read. **Lesson: contiguity beats pass-count here; #9's separate-but-contiguous diffusion is the
-better structure.** Scaffold: `claude/bench_fusion_ab.jl`. No cheap horizontal lever now remains.
+better structure.** No cheap horizontal lever now remains. (The fused kernels + their A/B scaffold
+were reverted; reconstruct from this branch's git history at commit `564c2f7`'s parent if revisiting.)
 
 ## Advection schemes — `:FFSL` (opt-in high-fidelity)
 

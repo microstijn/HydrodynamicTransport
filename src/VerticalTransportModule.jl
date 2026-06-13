@@ -121,6 +121,11 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     ntr = length(tracer_names)
     nchunks = max(1, min(Threads.nthreads(), ntr))
 
+    # Vertical advection is a no-op when there is no vertical velocity (e.g. hydro files with no
+    # omega/w, where state.w stays 0). Detect that once and skip the whole advection pass — the
+    # diffusion then runs in place. Exact (zero advection = identity), and saves a full grid pass.
+    w_active = any(!=(0.0), state.w)
+
     Threads.@threads for cid in 1:nchunks
         flux_col = Vector{Float64}(undef, nz + 1)   # per-task vertical-flux column scratch
         rhs = Vector{Float64}(undef, nz)            # per-task tridiagonal RHS scratch
@@ -133,40 +138,44 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
             C_final = state.tracers[tracer_name]
             C_buffer = state._buffer1[tracer_name]
 
-            # --- 1. Advection Step (serial over columns within this tracer) ---
-            @inbounds for j_phys in 1:ny, i_phys in 1:nx
-                i_glob, j_glob = i_phys + ng, j_phys + ng
-                C_col_in = view(C_final, i_glob, j_glob, :)
-                C_col_out = view(C_buffer, i_glob, j_glob, :)
+            # --- 1. Advection Step (serial over columns; skipped entirely when w == 0) ---
+            if w_active
+                @inbounds for j_phys in 1:ny, i_phys in 1:nx
+                    i_glob, j_glob = i_phys + ng, j_phys + ng
+                    C_col_in = view(C_final, i_glob, j_glob, :)
+                    C_col_out = view(C_buffer, i_glob, j_glob, :)
 
-                flux_col .= 0.0
-                for k in 2:nz
-                    velocity = state.w[i_glob, j_glob, k]
-                    concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
-                    face_area = if isa(grid, CartesianGrid)
-                        grid.face_area_z[i_glob, j_glob, k]
-                    else # CurvilinearGrid
-                        1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+                    flux_col .= 0.0
+                    for k in 2:nz
+                        velocity = state.w[i_glob, j_glob, k]
+                        concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
+                        face_area = if isa(grid, CartesianGrid)
+                            grid.face_area_z[i_glob, j_glob, k]
+                        else # CurvilinearGrid
+                            1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
+                        end
+                        flux_col[k] = velocity * concentration_at_face * face_area
                     end
-                    flux_col[k] = velocity * concentration_at_face * face_area
-                end
 
-                for k in 1:nz
-                    flux_divergence = flux_col[k+1] - flux_col[k]
-                    volume = grid.volume[i_glob, j_glob, k]
-                    if volume > 0
-                        C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
-                    else
-                        C_col_out[k] = C_col_in[k]
+                    for k in 1:nz
+                        flux_divergence = flux_col[k+1] - flux_col[k]
+                        volume = grid.volume[i_glob, j_glob, k]
+                        if volume > 0
+                            C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
+                        else
+                            C_col_out[k] = C_col_in[k]
+                        end
                     end
                 end
             end
+            # Diffusion reads the advected field if advection ran, else operates on C_final in place.
+            diff_src = w_active ? C_buffer : C_final
 
             # --- 2. Diffusion Step (implicit column solve) ---
             if isa(grid, CurvilinearGrid)
                 @inbounds for j_phys in 1:ny, i_phys in 1:nx
                     i_glob, j_glob = i_phys + ng, j_phys + ng
-                    C_col_in = view(C_buffer, i_glob, j_glob, :)
+                    C_col_in = view(diff_src, i_glob, j_glob, :)
                     C_col_out = view(C_final, i_glob, j_glob, :)
                     for k in 1:nz
                         dz_k = get_dz_centers(grid, i_glob, j_glob, k)
@@ -177,7 +186,7 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
             else
                 @inbounds for j_phys in 1:ny, i_phys in 1:nx
                     i_glob, j_glob = i_phys + ng, j_phys + ng
-                    C_col_in = view(C_buffer, i_glob, j_glob, :)
+                    C_col_in = view(diff_src, i_glob, j_glob, :)
                     C_col_out = view(C_final, i_glob, j_glob, :)
                     solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
                 end

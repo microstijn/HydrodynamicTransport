@@ -189,6 +189,20 @@ end-to-end ≈ 0.92x of TVD+F64 with strictly better numerics. NOTE: the D1 camp
 campaign, set that column to `FFSL` in `K7_hydro_execution_manifest_v4.csv` — the code default only
 affects callers that don't specify a scheme.
 
+### #7 — Skip vertical advection when `w == 0`  *(~34% of the vertical step)*
+
+The CurviLoire MARS3D file has **no vertical water velocity** (`w`/omega): its only level-dim
+fields are `UZ`/`VZ` (horizontal velocity), `TEMP`/`SAL`, the sediment concentrations, and `WS_Mud`
+(mud *settling* velocity, not water advection). So `state.w` stays 0 and the vertical-advection pass
+was computing zero fluxes (`C_buffer = C_final`) for every tracer, every step. `vertical_transport!`
+now checks `w_active = any(!=(0), state.w)` once and **skips the whole advection pass** when w≡0,
+running the CN diffusion in place. Exact (zero advection = identity; bit-identical), and falls back
+to the full path automatically if a file does provide `w`. Real grid, 8 tracers:
+`37.3 → 24.7 ms` (~34%); ~9% off the full transport step. So with w≡0 the only vertical exchange is
+the weak CN diffusion (Kz=1e-4) + sediment settling (`WS_Mud`, sediment tracers only) — i.e. **no
+vertical advection physics at all**; to add it one would diagnose omega from continuity (UZ/VZ +
+layer-thickness divergence), which would also restore sigma-grid consistency. Separate from speed.
+
 ### #6 — FFSL face-Courant precompute  *(~5%; FFSL is compute-bound)*
 
 The per-face Courant numbers are **tracer-independent** (function of velocity / free-surface /

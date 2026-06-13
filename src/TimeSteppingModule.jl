@@ -63,6 +63,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         Kh::Float64=1.0,
                         Kz::Float64=1e-4,
                         D_crit::Float64=0.0,
+                        diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
                         output_dir::Union{String, Nothing}=nothing,
                         output_interval::Union{Float64, Nothing}=nothing,
                         write_full_state::Bool=true,
@@ -143,7 +144,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
             # Hydrodynamics Step
             if ds !== nothing && hydro_data !== nothing
-                update_hydrodynamics!(work, grid, ds, hydro_data, time + trial_dt)
+                update_hydrodynamics!(work, grid, ds, hydro_data, time + trial_dt; diagnose_w=diagnose_vertical_velocity)
             else
                 update_hydrodynamics_placeholder!(work, grid, time + trial_dt)
             end

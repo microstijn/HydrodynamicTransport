@@ -189,19 +189,35 @@ end-to-end ≈ 0.92x of TVD+F64 with strictly better numerics. NOTE: the D1 camp
 campaign, set that column to `FFSL` in `K7_hydro_execution_manifest_v4.csv` — the code default only
 affects callers that don't specify a scheme.
 
-### #7 — Skip vertical advection when `w == 0`  *(~34% of the vertical step)*
+### #8 — Vertical advection via omega-from-continuity + implicit vertical solve  *(physics)*
 
-The CurviLoire MARS3D file has **no vertical water velocity** (`w`/omega): its only level-dim
-fields are `UZ`/`VZ` (horizontal velocity), `TEMP`/`SAL`, the sediment concentrations, and `WS_Mud`
-(mud *settling* velocity, not water advection). So `state.w` stays 0 and the vertical-advection pass
-was computing zero fluxes (`C_buffer = C_final`) for every tracer, every step. `vertical_transport!`
-now checks `w_active = any(!=(0), state.w)` once and **skips the whole advection pass** when w≡0,
-running the CN diffusion in place. Exact (zero advection = identity; bit-identical), and falls back
-to the full path automatically if a file does provide `w`. Real grid, 8 tracers:
-`37.3 → 24.7 ms` (~34%); ~9% off the full transport step. So with w≡0 the only vertical exchange is
-the weak CN diffusion (Kz=1e-4) + sediment settling (`WS_Mud`, sediment tracers only) — i.e. **no
-vertical advection physics at all**; to add it one would diagnose omega from continuity (UZ/VZ +
-layer-thickness divergence), which would also restore sigma-grid consistency. Separate from speed.
+The CurviLoire MARS3D file stores **no vertical water velocity** (only `UZ`/`VZ` horizontal,
+`TEMP`/`SAL`, sediment concentrations, and `WS_Mud` = mud *settling* velocity). So the offline
+transport had **no vertical advection** — and on a sigma grid the horizontal sweeps alone don't
+preserve a uniform tracer. Now `diagnose_vertical_velocity!` (`Hydrodynamics.jl`, called from
+`update_hydrodynamics!`; toggle with `run_simulation(...; diagnose_vertical_velocity=…)`, default
+**on**) reconstructs omega from continuity using the horizontal transports already loaded:
+per column `Wflux(k+1)=Wflux(k)-HDiv(k)` with **rigid-lid closure** (w=0 at seabed & surface, the
+residual column divergence — the neglected SSH tendency, since volumes are static — spread by layer
+thickness), then `w=Wflux/area`. **Coastline/boundary cells are left at w=0** (a land/edge neighbour
+breaks horizontal continuity → the "divergence" is an artefact; diagnosing there pumped spurious
+vertical transport and lost ~24% of an upstream tracer's mass — e.g. cell (411,72) at the
+min_depth-masked river head).
+
+`vertical_transport!` was reworked: when w is active it now does a **single implicit per-column
+solve** — **backward-Euler upwind advection + CN diffusion** (`_advdiff_z_column!`, allocation-free
+Thomas). Implicit because the diagnosed omega gives vertical Courant > 1 in thin cells, where the
+old **explicit** upwind is unstable and the adaptive controller (horizontal-CFL only) never catches
+it — that was losing/redistributing mass. Implicit upwind is **unconditionally stable, conservative
+(flux-form), and positivity-preserving**. With w≡0 it falls back to the pure CN-diffusion path.
+
+**Validation (real grid):** diagnosed w is physical (max 9.6e-3, median 6.6e-5 m/s); mass conserved
+(`up2/nw/ind` all back to ≈ released fraction); strictly positive; uniform-tracer distortion ~**1.9×**
+lower than w≡0. Cost: vertical ~38 ms with advection vs ~38 ms diffusion-only — the implicit
+advection adds terms to the same Thomas solve, so it's **nearly free**; ~+14 ms vs the old
+diffusion-only-no-advection (the price of the missing physics). 110/110 tests pass. *Caveat:* a few
+isolated cells still show large single-step uniform-tracer distortion (max ~0.98) from horizontal
+FFSL on the steep sigma grid — present with w≡0 too, i.e. not caused by the diagnosis.
 
 ### #6 — FFSL face-Courant precompute  *(~5%; FFSL is compute-bound)*
 

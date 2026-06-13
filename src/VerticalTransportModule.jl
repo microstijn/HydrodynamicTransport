@@ -109,6 +109,50 @@ end
     return nothing
 end
 
+# --- Allocation-free implicit vertical advection + diffusion column solve ---
+# Backward-Euler upwind advection + Crank-Nicolson diffusion, Thomas-solved in place. Used when the
+# (diagnosed) vertical velocity is active: the diagnosed omega can give a vertical Courant > 1 in
+# thin sigma cells, where the explicit upwind advection is unstable and the adaptive controller
+# (which limits dt by the horizontal CFL only) does not catch it. Implicit upwind is unconditionally
+# stable, conservative (flux-form: face fluxes telescope), and positivity-preserving. With wf == 0
+# this reduces to the pure CN diffusion path.
+#   wf : vertical velocity at cell BOTTOM faces, length nz+1 (wf[1]=seabed=0, wf[nz+1]=surface=0)
+#   dz : per-cell layer thickness, length nz
+@inline function _advdiff_z_column!(Cout, Cin, wf, dz, nz, dt, Kz, dl, dd, du, rhs, cprime)
+    @inbounds begin
+        for k in 1:nz
+            a = dz[k] > 0.0 ? 0.5 * Kz * dt / (dz[k]*dz[k]) : 0.0   # CN diffusion coefficient
+            idz = dz[k] > 0.0 ? dt / dz[k] : 0.0
+            bb = wf[k]   * idz        # advective Courant at bottom face (wf[1]=0 -> 0 at seabed)
+            bt = wf[k+1] * idz        # advective Courant at top face    (wf[nz+1]=0 -> 0 at surface)
+            # Implicit upwind advection: bottom-face donor is k-1 if wf[k]>=0 else k; top-face donor
+            # is k if wf[k+1]>=0 else k+1. Contributions to the implicit operator A:
+            adv_main = (wf[k+1] >= 0.0 ? bt : 0.0) - (wf[k] < 0.0 ? bb : 0.0)
+            adv_sub  = (wf[k]   >= 0.0 ? -bb : 0.0)   # couples k-1
+            adv_sup  = (wf[k+1] <  0.0 ?  bt : 0.0)   # couples k+1
+            dd[k] = 1.0 + 2.0*a + adv_main
+            dl[k] = (k == nz ? -2.0*a : -a) + (k > 1  ? adv_sub : 0.0)
+            du[k] = (k == 1  ? -2.0*a : -a) + (k < nz ? adv_sup : 0.0)
+            # RHS = CN-diffusion explicit half (advection is fully implicit -> no RHS term).
+            s = (1.0 - 2.0*a) * Cin[k]
+            if k > 1;  s += (k == nz ? 2.0*a : a) * Cin[k-1]; end
+            if k < nz; s += (k == 1  ? 2.0*a : a) * Cin[k+1]; end
+            rhs[k] = s
+        end
+        cprime[1] = du[1] / dd[1]; rhs[1] = rhs[1] / dd[1]
+        for k in 2:nz
+            m = dd[k] - dl[k]*cprime[k-1]
+            cprime[k] = du[k] / m
+            rhs[k] = (rhs[k] - dl[k]*rhs[k-1]) / m
+        end
+        Cout[nz] = rhs[nz]
+        for k in nz-1:-1:1
+            Cout[k] = rhs[k] - cprime[k]*Cout[k+1]
+        end
+    end
+    return nothing
+end
+
 # --- Main transport function (Multithreaded over tracers) ---
 function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     Kz = 1e-4
@@ -127,68 +171,36 @@ function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
     w_active = any(!=(0.0), state.w)
 
     Threads.@threads for cid in 1:nchunks
-        flux_col = Vector{Float64}(undef, nz + 1)   # per-task vertical-flux column scratch
-        rhs = Vector{Float64}(undef, nz)            # per-task tridiagonal RHS scratch
-        # Per-task CN-diffusion column scratch (CurvilinearGrid path).
-        alpha = Vector{Float64}(undef, nz); dl = Vector{Float64}(undef, nz)
-        dd = Vector{Float64}(undef, nz); du = Vector{Float64}(undef, nz); cprime = Vector{Float64}(undef, nz)
+        # Per-task column scratch.
+        wf = Vector{Float64}(undef, nz + 1)         # vertical velocity column (bottom faces)
+        dzc = Vector{Float64}(undef, nz)            # layer thicknesses
+        rhs = Vector{Float64}(undef, nz); alpha = Vector{Float64}(undef, nz)
+        dl = Vector{Float64}(undef, nz); dd = Vector{Float64}(undef, nz)
+        du = Vector{Float64}(undef, nz); cprime = Vector{Float64}(undef, nz)
         ti = cid
         while ti <= ntr
             tracer_name = tracer_names[ti]
             C_final = state.tracers[tracer_name]
-            C_buffer = state._buffer1[tracer_name]
+            curvi = isa(grid, CurvilinearGrid)
 
-            # --- 1. Advection Step (serial over columns; skipped entirely when w == 0) ---
-            if w_active
-                @inbounds for j_phys in 1:ny, i_phys in 1:nx
-                    i_glob, j_glob = i_phys + ng, j_phys + ng
-                    C_col_in = view(C_final, i_glob, j_glob, :)
-                    C_col_out = view(C_buffer, i_glob, j_glob, :)
-
-                    flux_col .= 0.0
-                    for k in 2:nz
-                        velocity = state.w[i_glob, j_glob, k]
-                        concentration_at_face = velocity >= 0 ? C_col_in[k-1] : C_col_in[k]
-                        face_area = if isa(grid, CartesianGrid)
-                            grid.face_area_z[i_glob, j_glob, k]
-                        else # CurvilinearGrid
-                            1 / (grid.pm[i_glob, j_glob] * grid.pn[i_glob, j_glob])
-                        end
-                        flux_col[k] = velocity * concentration_at_face * face_area
-                    end
-
-                    for k in 1:nz
-                        flux_divergence = flux_col[k+1] - flux_col[k]
-                        volume = grid.volume[i_glob, j_glob, k]
-                        if volume > 0
-                            C_col_out[k] = C_col_in[k] - (dt / volume) * flux_divergence
-                        else
-                            C_col_out[k] = C_col_in[k]
-                        end
-                    end
-                end
-            end
-            # Diffusion reads the advected field if advection ran, else operates on C_final in place.
-            diff_src = w_active ? C_buffer : C_final
-
-            # --- 2. Diffusion Step (implicit column solve) ---
-            if isa(grid, CurvilinearGrid)
-                @inbounds for j_phys in 1:ny, i_phys in 1:nx
-                    i_glob, j_glob = i_phys + ng, j_phys + ng
-                    C_col_in = view(diff_src, i_glob, j_glob, :)
-                    C_col_out = view(C_final, i_glob, j_glob, :)
+            # One implicit column solve per water column, in place on C_final:
+            #  - w active -> implicit upwind advection + CN diffusion (unconditionally stable);
+            #  - w == 0   -> CN diffusion only (fast path, no advection reads).
+            @inbounds for j_phys in 1:ny, i_phys in 1:nx
+                i_glob, j_glob = i_phys + ng, j_phys + ng
+                C_col = view(C_final, i_glob, j_glob, :)
+                if w_active
+                    for k in 1:nz; dzc[k] = get_dz_centers(grid, i_glob, j_glob, k); end
+                    for k in 1:nz+1; wf[k] = state.w[i_glob, j_glob, k]; end
+                    _advdiff_z_column!(C_col, C_col, wf, dzc, nz, dt, Kz, dl, dd, du, rhs, cprime)
+                elseif curvi
                     for k in 1:nz
                         dz_k = get_dz_centers(grid, i_glob, j_glob, k)
                         alpha[k] = dz_k > 0.0 ? 0.5 * Kz * dt / (dz_k * dz_k) : 0.0
                     end
-                    _cn_diffuse_column!(C_col_out, C_col_in, alpha, nz, dl, dd, du, rhs, cprime)
-                end
-            else
-                @inbounds for j_phys in 1:ny, i_phys in 1:nx
-                    i_glob, j_glob = i_phys + ng, j_phys + ng
-                    C_col_in = view(diff_src, i_glob, j_glob, :)
-                    C_col_out = view(C_final, i_glob, j_glob, :)
-                    solve_implicit_diffusion_column!(C_col_out, C_col_in, grid, i_glob, j_glob, dt, Kz)
+                    _cn_diffuse_column!(C_col, C_col, alpha, nz, dl, dd, du, rhs, cprime)
+                else
+                    solve_implicit_diffusion_column!(C_col, C_col, grid, i_glob, j_glob, dt, Kz)
                 end
             end
 

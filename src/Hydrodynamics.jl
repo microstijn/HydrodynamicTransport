@@ -2,11 +2,12 @@
 
 module HydrodynamicsModule
 
-export update_hydrodynamics!, update_hydrodynamics_placeholder!
+export update_hydrodynamics!, update_hydrodynamics_placeholder!, diagnose_vertical_velocity!
 
 using ..HydrodynamicTransport.ModelStructs
 using NCDatasets
 using Dates
+using Base.Threads: @threads
 
 # --- The placeholder functions for CartesianGrid remain unchanged ---
 function update_hydrodynamics_placeholder!(state::State, grid::CartesianGrid, time::Float64)
@@ -96,7 +97,71 @@ end
 # Numerically identical to the previous version; the only change is that the time axis is
 # converted once and the bracketing slabs are read from disk only when their time index
 # changes (then kept in hydro_data.cache), instead of being re-read every timestep.
-function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64)
+"""
+    diagnose_vertical_velocity!(state, grid)
+
+Diagnose the sigma-coordinate vertical velocity from continuity, using the horizontal transports
+already in `state.u`/`state.v` (e.g. MARS3D `UZ`/`VZ`). Many hydro files store no `w`/omega, so
+the offline transport would otherwise run with **no vertical advection** — and on a sigma grid the
+horizontal sweeps alone do not preserve a uniform tracer. This fills `state.w` with the vertical
+velocity that closes the discrete volume budget per cell.
+
+For each wet column, the horizontal volume divergence of cell k is
+`HDiv(k) = u·Ax|_east - u·Ax|_west + v·Ay|_north - v·Ay|_south`, and the vertical volume flux
+`Wflux` obeys `Wflux(k+1) = Wflux(k) - HDiv(k)`. Rigid-lid closure pins `Wflux = 0` at the seabed
+and the surface; the residual column divergence `Dtot` (the neglected sea-surface-height tendency,
+since cell volumes are static) is distributed by layer thickness:
+`Wflux(k) = -Σ_{l<k} HDiv(l) + (H_below(k)/H_total)·Dtot`, then `w = Wflux / cell_area`. `w` is stored
+at cell **bottom faces** (`w[k]` = face between cells k-1 and k), matching `vertical_transport!`;
+`w[1]` (seabed) and `w[nz+1]` (surface) are 0. Land columns get `w = 0`.
+"""
+function diagnose_vertical_velocity!(state::State, grid::CurvilinearGrid)
+    ng = grid.ng; nx, ny, nz = grid.nx, grid.ny, grid.nz
+    u = state.u; v = state.v; w = state.w
+    fax = grid.face_area_x; fay = grid.face_area_y; pm = grid.pm; pn = grid.pn; vol = grid.volume
+    # Horizontal volume divergence of cell (ig,jg,k). Cheap; recomputed (not stored) so the loop
+    # needs no per-task scratch (avoids the threadid()/thread-pool pitfall) and zero allocation.
+    @inline hdiv(ig, jg, k) = @inbounds(u[ig+1, jg, k] * fax[ig+1, jg, k] - u[ig, jg, k] * fax[ig, jg, k] +
+                                        v[ig, jg+1, k] * fay[ig, jg+1, k] - v[ig, jg, k] * fay[ig, jg, k])
+    @threads for j in 1:ny
+        for i in 1:nx
+            ig, jg = i + ng, j + ng
+            @inbounds begin
+                # Diagnose only at interior cells whose four horizontal faces all carry physical
+                # flow. At coastline cells (a land/masked neighbour) or domain-edge cells the
+                # horizontal continuity is broken (a face is cut, or the boundary inflow is unknown),
+                # so the column "divergence" is an artefact -> diagnosing w there pumps spurious
+                # vertical transport. Leave w = 0 there (no vertical advection in the boundary ring).
+                edge = i == 1 || i == nx || j == 1 || j == ny
+                if !grid.mask_rho[ig, jg] || edge ||
+                   !grid.mask_rho[ig-1, jg] || !grid.mask_rho[ig+1, jg] ||
+                   !grid.mask_rho[ig, jg-1] || !grid.mask_rho[ig, jg+1]
+                    for k in 1:nz+1; w[ig, jg, k] = 0.0; end
+                    continue
+                end
+                inv_area = pm[ig, jg] * pn[ig, jg]          # 1 / cell horizontal area
+                # Pass 1: column-total horizontal divergence and depth.
+                Dtot = 0.0; Htot = 0.0
+                for k in 1:nz
+                    Dtot += hdiv(ig, jg, k); Htot += vol[ig, jg, k] * inv_area
+                end
+                invH = Htot > 0.0 ? 1.0 / Htot : 0.0
+                # Pass 2: cumulative flux with rigid-lid closure (w = 0 at seabed and surface; the
+                # residual column divergence Dtot is spread by layer thickness).
+                w[ig, jg, 1] = 0.0; w[ig, jg, nz+1] = 0.0
+                cum_div = 0.0; cum_h = 0.0
+                for k in 2:nz
+                    cum_div += hdiv(ig, jg, k-1); cum_h += vol[ig, jg, k-1] * inv_area
+                    Wflux = -cum_div + (cum_h * invH) * Dtot
+                    w[ig, jg, k] = Wflux * inv_area              # w = Wflux / area
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64; diagnose_w::Bool=true)
     ng = grid.ng
     cache = hydro_data.cache
 
@@ -151,6 +216,9 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
             end
         end
     end
+    # Files store no w/omega -> diagnose the vertical velocity from continuity so the sigma
+    # transport has vertical advection (and preserves a uniform tracer). Disable with diagnose_w=false.
+    diagnose_w && diagnose_vertical_velocity!(state, grid)
     return nothing
 end
 

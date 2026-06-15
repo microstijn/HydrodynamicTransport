@@ -94,14 +94,18 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     max_dt_taken = 0.0
     start_wall_time = time_ns()
 
+    # First output boundary STRICTLY after `time`. The `floor(...)+1` form is robust to
+    # floating-point magnitude (an absolute `+1e-9` nudge is silently lost when `time` is a
+    # large exact multiple of the interval, which collapsed dt_bound to 0 and aborted the run
+    # before any output — fixed here).
     next_full_state_output_time = if full_state_output_interval !== nothing
-        ceil((time + 1e-9) / full_state_output_interval) * full_state_output_interval
+        (floor(time / full_state_output_interval) + 1) * full_state_output_interval
     else
         Inf
     end
 
     next_receptor_monitor_time = if receptor_monitor_interval !== nothing
-        ceil((time + 1e-9) / receptor_monitor_interval) * receptor_monitor_interval
+        (floor(time / receptor_monitor_interval) + 1) * receptor_monitor_interval
     else
         Inf
     end
@@ -116,6 +120,16 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     while time < end_time
         trial_dt = use_adaptive_dt ? min(current_dt, dt_max) : dt
 
+        # Genuine CFL collapse guard: the stability-limited dt itself is below the floor.
+        # Checked BEFORE the output/end-boundary clamp, because a step deliberately shortened
+        # to land on a save boundary (or on end_time) is legitimately allowed to be < dt_min and
+        # must not abort the run (previously this false-triggered at end-of-run and whenever the
+        # output-boundary rounding collapsed the bound to 0).
+        if use_adaptive_dt && trial_dt < dt_min
+            println("\nWarning: CFL-limited timestep below dt_min. Stopping simulation.")
+            break
+        end
+
         # Consider both output clocks for finding the next dt bound
         dt_bound = end_time - time
         if write_full_state && next_full_state_output_time < Inf
@@ -125,12 +139,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             dt_bound = min(dt_bound, next_receptor_monitor_time - time)
         end
 
+        # Boundary clamp may legitimately make the step < dt_min (to hit a save/end time).
         trial_dt = min(trial_dt, dt_bound)
-
-        if use_adaptive_dt && trial_dt < dt_min
-            println("\nWarning: Timestep below minimum threshold. Stopping simulation.")
-            break
-        end
         if trial_dt < 1e-9; break; end
 
         step_successful = false

@@ -154,8 +154,10 @@ end
 end
 
 # --- Main transport function (Multithreaded over tracers) ---
-function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64)
-    Kz = 1e-4
+function vertical_transport!(state::State, grid::AbstractGrid, dt::Float64; Kz::Float64=1e-4)
+    # Kz defaults to 1e-4 (the long-standing hardcoded value) so existing positional callers stay
+    # bit-identical; run_simulation now threads its `Kz` kwarg through here, and Kz=0.0 isolates
+    # pure vertical advection (used by the analytical vertical benchmarks in test/benchmarks/).
     ng = grid.ng
     nx, ny, nz = isa(grid, CartesianGrid) ? grid.dims : (grid.nx, grid.ny, grid.nz)
     if nz <= 1; return; end

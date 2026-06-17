@@ -172,8 +172,8 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                     advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, work, grid, trial_dt, Kz, limiter_func)
                 end
             else
-                horizontal_transport!(work, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
-                vertical_transport!(work, grid, trial_dt)
+                horizontal_transport!(work, grid, trial_dt, advection_scheme, D_crit, boundary_conditions; Kh=Kh)
+                vertical_transport!(work, grid, trial_dt; Kz=Kz)
             end
 
             # --- Physics Steps ---
@@ -340,8 +340,8 @@ function run_and_store_simulation(grid::AbstractGrid, initial_state::State, sour
                     advect_diffuse_tvd_implicit_z!(C_initial, C_buffer2, state_backup, grid, trial_dt, Kz, limiter_func)
                 end
             else
-                horizontal_transport!(state_backup, grid, trial_dt, advection_scheme, D_crit, boundary_conditions)
-                vertical_transport!(state_backup, grid, trial_dt)
+                horizontal_transport!(state_backup, grid, trial_dt, advection_scheme, D_crit, boundary_conditions; Kh=Kh)
+                vertical_transport!(state_backup, grid, trial_dt; Kz=Kz)
             end
             
             deposition = apply_settling!(state_backup, grid, trial_dt, sediment_params)

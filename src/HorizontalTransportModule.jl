@@ -50,8 +50,10 @@ function _ensure_flux_pools!(state::State, n::Int)
     return nothing
 end
 
-function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition})
-    Kh = 1.0
+function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, scheme::Symbol, D_crit::Float64, boundary_conditions::Vector{<:BoundaryCondition}; Kh::Float64=1.0)
+    # Kh defaults to 1.0 (the long-standing hardcoded value) so existing positional callers stay
+    # bit-identical; run_simulation now threads its `Kh` kwarg through here, and Kh=0.0 isolates
+    # pure advection (used by the analytical advection benchmarks in test/benchmarks/).
     if scheme == :TVD || scheme == :UP3 || scheme == :FFSL
         # Tracers are independent -> parallelize over them (one tracer per core, each with its
         # own scratch flux buffers). The per-tracer kernels run serially, which keeps cache

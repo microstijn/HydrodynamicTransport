@@ -22,6 +22,15 @@ using HydrodynamicTransport.SettlingModule: apply_settling!
 using HydrodynamicTransport.BedExchangeModule: bed_exchange!
 using HydrodynamicTransport.VectorOperationsModule: rotate_velocities_to_grid!, rotate_velocities_to_geographic
 
+# Analytical solver-validation benchmarks (Groups A/B/C). The full studies live in the repo-root
+# validate_advection.jl / validate_vertical.jl / validate_diffusion.jl; here we run small, fast
+# configurations and assert the headline numerical guarantees as regressions.
+include(joinpath(@__DIR__, "benchmarks", "benchmark_common.jl"))
+using .BenchmarkCommon
+include(joinpath(@__DIR__, "benchmarks", "advection_benchmarks.jl"))
+include(joinpath(@__DIR__, "benchmarks", "vertical_benchmarks.jl"))
+include(joinpath(@__DIR__, "benchmarks", "diffusion_benchmarks.jl"))
+
 # ------------------------------------------------------------------------------------------
 # Shared fixtures
 # ------------------------------------------------------------------------------------------
@@ -488,6 +497,50 @@ end
                 close(ds)
             end
         end
+    end
+
+    @testset "Analytical benchmarks — horizontal advection (Group A)" begin
+        # Order of accuracy: FFSL on a smooth translated Gaussian (monotone PPM -> ~2nd order).
+        tr = bench_translation(:FFSL; resolutions=[30, 60], U=1.0, courant=0.5)
+        @test fit_order([r.dx for r in tr], [r.L2 for r in tr]) > 1.7
+        @test all(abs(r.mass_drift) < 1e-4 for r in tr)               # conservative
+        # Solid-body rotation: positive, peak-preserving, near-conservative.
+        rot = bench_gaussian_rotation(:FFSL; nx=60, courant=0.5)
+        @test rot.minval >= -1e-3                                     # positivity
+        @test rot.peak_retention > 0.8                               # peak preserved
+        @test abs(rot.mass_drift) < 1e-3
+        # Zalesak slotted cylinder: FCT monotonicity (no under/overshoot).
+        zal = bench_zalesak(:FFSL; nx=60, courant=0.5)
+        @test zal.minval >= -1e-6
+        @test zal.maxval <= 1.0 + 1e-3
+    end
+
+    @testset "Analytical benchmarks — vertical transport (Group B)" begin
+        # Diagnosed omega closes the discrete volume budget to ~machine zero.
+        cc = bench_continuity_closure(; nx=12, nz=8)
+        @test cc.residual_diagnosed < 1e-10
+        @test cc.residual_zero_w > 1e-2                              # and is necessary
+        # Implicit vertical upwind: 1st-order, positive.
+        va = bench_vertical_advection(; resolutions=[40, 80], W=1.0, courant=0.4)
+        @test fit_order([r.dz for r in va], [r.L2 for r in va]) > 0.7
+        @test all(r.minval >= -1e-6 for r in va)
+        # Unconditional stability at vertical Courant ≫ 1.
+        st = bench_vertical_stability(; nz=60, courant=5.0, nsteps=40)
+        @test st.finite && st.minval >= -1e-6 && st.maxval <= 1.05
+    end
+
+    @testset "Analytical benchmarks — diffusion (Group C)" begin
+        # 2-D horizontal diffusion vs Gaussian-spreading: ~2nd order, variance recovered, conservative.
+        hd = bench_horizontal_diffusion(; resolutions=[30, 60], Kh=2.0)
+        @test fit_order([r.dx for r in hd], [r.L2 for r in hd]) > 1.7
+        @test all(r.sigma2_relerr < 1e-2 for r in hd)
+        @test all(abs(r.mass_drift) < 1e-4 for r in hd)
+        # 1-D vertical CN diffusion: ~2nd order.
+        vd = bench_vertical_diffusion(; resolutions=[20, 40], Kz=1e-3)
+        @test fit_order([r.dz for r in vd], [r.L2 for r in vd]) > 1.7
+        # CN unconditional stability at large diffusion number.
+        cs = bench_vertical_diffusion_stability(; nz=40, diffnum=10.0, nsteps=50)
+        @test cs.finite && cs.maxval <= 1.0 + 1e-6
     end
 
 end

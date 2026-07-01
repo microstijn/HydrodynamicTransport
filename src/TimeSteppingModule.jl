@@ -64,6 +64,18 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         Kz::Float64=1e-4,
                         D_crit::Float64=0.0,
                         diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
+                        # --- BACKWARD / ADJOINT mode (opt-in; forward path byte-identical when false) ---
+                        # For a LINEAR passive tracer the adjoint transport is the same advection-diffusion
+                        # equation on the TIME-REVERSED, velocity-FLIPPED flow (flux-form + Crank-Nicolson are
+                        # self-adjoint under u -> -u). Seeded at the receptor, one such run gives the receptor
+                        # footprint / sensitivity to ALL sources at once (cf. FLEXPART backward mode). The
+                        # internal clock `time` then measures LAG since the receptor pulse and increases 0..horizon
+                        # (so output/monitor/adaptive-dt logic is unchanged); the real hydro time runs the other
+                        # way, t_real = reverse_time_origin - time, and u,v,w are negated after each hydro read.
+                        # NOTE: timed PointSources are not real-time-remapped here (PoC seeds via the receptor IC);
+                        # release at the receptor as an initial condition or a lag-0 source.
+                        reverse_time::Bool=false,
+                        reverse_time_origin::Float64=0.0,  # real hydro time corresponding to lag 0 (window end)
                         output_dir::Union{String, Nothing}=nothing,
                         output_interval::Union{Float64, Nothing}=nothing,
                         write_full_state::Bool=true,
@@ -153,11 +165,17 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
 
             apply_boundary_conditions!(work, grid, boundary_conditions)
 
-            # Hydrodynamics Step
+            # Hydrodynamics Step. Backward runs read the real field at t_real = origin - lag and negate
+            # the velocity (the adjoint of linear advection-diffusion); w is negated together with u,v so
+            # a diagnosed omega stays consistent with the reversed horizontal field. Forward is untouched.
+            hydro_time = reverse_time ? reverse_time_origin - (time + trial_dt) : time + trial_dt
             if ds !== nothing && hydro_data !== nothing
-                update_hydrodynamics!(work, grid, ds, hydro_data, time + trial_dt; diagnose_w=diagnose_vertical_velocity)
+                update_hydrodynamics!(work, grid, ds, hydro_data, hydro_time; diagnose_w=diagnose_vertical_velocity)
             else
-                update_hydrodynamics_placeholder!(work, grid, time + trial_dt)
+                update_hydrodynamics_placeholder!(work, grid, hydro_time)
+            end
+            if reverse_time
+                @. work.u = -work.u; @. work.v = -work.v; @. work.w = -work.w
             end
 
             # Transport Step

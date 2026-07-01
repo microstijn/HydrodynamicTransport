@@ -30,6 +30,7 @@ using .BenchmarkCommon
 include(joinpath(@__DIR__, "benchmarks", "advection_benchmarks.jl"))
 include(joinpath(@__DIR__, "benchmarks", "vertical_benchmarks.jl"))
 include(joinpath(@__DIR__, "benchmarks", "diffusion_benchmarks.jl"))
+include(joinpath(@__DIR__, "benchmarks", "reciprocity_benchmark.jl"))
 
 # ------------------------------------------------------------------------------------------
 # Shared fixtures
@@ -541,6 +542,28 @@ end
         # CN unconditional stability at large diffusion number.
         cs = bench_vertical_diffusion_stability(; nz=40, diffnum=10.0, nsteps=50)
         @test cs.finite && cs.maxval <= 1.0 + 1e-6
+    end
+
+    @testset "Analytical benchmarks — source<->receptor reciprocity (Group D)" begin
+        # Diffusion is self-adjoint (symmetric CN stencil) -> reciprocity to ~machine zero.
+        dh = bench_reciprocity(:FFSL; kind=:diffusion_h)
+        @test dh.peak_fwd > 1e-6 && dh.peak_bwd > 1e-6      # both receptors actually see the pulse
+        @test dh.relL2 < 1e-8                               # measured: 0.0 (exact)
+        dv = bench_reciprocity(:FFSL; kind=:diffusion_v)
+        @test dv.peak_fwd > 1e-6 && dv.relL2 < 1e-6         # measured: ~5e-8
+        # UNIFORM flow: constant-velocity reversal is exactly the transpose -> reciprocity exact.
+        au = bench_reciprocity(:FFSL; kind=:advection)
+        @test au.peak_fwd > 1e-6 && au.peak_bwd > 1e-6
+        @test au.relL2 < 1e-6                               # measured: 0.0 (exact)
+        # SPATIALLY-VARYING flow (solid-body rotation): flux-form reversed-in-velocity ~ the discrete
+        # adjoint only to truncation -> reciprocity at the few-% level. This is the realistic Gate-1
+        # band reused by softMode E7 on the real (curvilinear/tidal) kernel library.
+        ar = bench_reciprocity(:FFSL; kind=:advection_rot)
+        @test ar.peak_fwd > 1e-6 && ar.peak_bwd > 1e-6
+        @test ar.relL2 < 0.10                               # measured: ~0.042
+        # reverse_time solver flag: on a steady field it must reproduce forward-on-negated-field exactly.
+        rt = bench_reverse_time_equivalence(:FFSL)
+        @test rt.peak > 1e-6 && rt.rel < 1e-10              # plumbing: identical to machine precision
     end
 
 end

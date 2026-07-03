@@ -63,6 +63,52 @@ function bench_continuity_closure(; nx::Int=20, nz::Int=8)
     end
 end
 
+# --- B1b: the rigid-lid LIMITATION — barotropic (depth-integral-nonzero) divergence is NOT closed ---
+"""
+    bench_continuity_barotropic(; nx, nz) -> (residual_diagnosed, residual_zero_w)
+
+Companion to `bench_continuity_closure` that exercises the case it deliberately excludes: a **barotropic**
+(depth-uniform) horizontal strain, for which the column-integrated divergence `Σ_k HDiv ≠ 0` (`Dtot ≠ 0`).
+The rigid-lid diagnosis pins the surface flux to zero and distributes `Dtot` by layer thickness, so it can
+only absorb the depth-integral-ZERO part; the barotropic part is left uncompensated. The net-flux
+divergence residual therefore does NOT go to machine zero — it stays ≈ the raw horizontal divergence
+(`residual_diagnosed ≈ residual_zero_w`, ratio ≈ 1). This documents, as a regression test, that a uniform
+tracer is preserved only for depth-integrated non-divergent flow: the frozen-volume solver has no tidal
+breathing. On the real macrotidal CurviLoire grid this manifests as a ~0.5 log10 C≡1 error at the
+intertidal receptor; it is an offline velocity-snapshot reconstruction limit, not a solver bug fixable by
+a free-surface refactor (that would need native mass fluxes). See `claude/SOLVER_VALIDATION.md`.
+"""
+function bench_continuity_barotropic(; nx::Int=20, nz::Int=8)
+    dx = 1.0; Lx = nx * dx
+    ufun = (x, y) -> sin(2π * x / Lx)                 # depth-uniform amplitude -> barotropic (Σ_k HDiv ≠ 0)
+    mktempdir() do dir
+        path = joinpath(dir, "strain_bt.nc")
+        write_velocity_nc(path; nx=nx, ny=nx, nz=nz, dx=dx, dy=dx, depth=10.0,
+                          ufun=ufun, vfun=(x, y) -> 0.0, tmax=10.0,
+                          uprofile=ones(nz), vprofile=zeros(nz))
+        return quiet() do
+            grid, ds, hydro, state = build_grid_state(path)
+            update_hydrodynamics!(state, grid, ds, hydro, 0.0; diagnose_w=true)
+            close(ds)
+            ng = grid.ng; u = state.u; v = state.v; w = state.w
+            fax = grid.face_area_x; fay = grid.face_area_y
+            maxres_diag = 0.0; maxres_zero = 0.0; fluxscale = 0.0
+            for k in 1:nz, j in 2:grid.ny-1, i in 2:grid.nx-1
+                ig = i + ng; jg = j + ng
+                area = 1.0 / (grid.pm[ig, jg] * grid.pn[ig, jg])
+                hdiv = u[ig+1, jg, k] * fax[ig+1, jg, k] - u[ig, jg, k] * fax[ig, jg, k] +
+                       v[ig, jg+1, k] * fay[ig, jg+1, k] - v[ig, jg, k] * fay[ig, jg, k]
+                vdiv = (w[ig, jg, k+1] - w[ig, jg, k]) * area
+                maxres_diag = max(maxres_diag, abs(hdiv + vdiv))
+                maxres_zero = max(maxres_zero, abs(hdiv))
+                fluxscale = max(fluxscale, abs(u[ig, jg, k] * fax[ig, jg, k]))
+            end
+            sc = fluxscale > 0 ? fluxscale : 1.0
+            (residual_diagnosed=maxres_diag / sc, residual_zero_w=maxres_zero / sc)
+        end
+    end
+end
+
 # --- shared driver for B2/B3: inject constant interior w, step vertical_transport! directly ---
 function _run_vertical_column(; nz::Int, W::Float64, Kz::Float64, dt::Float64, nsteps::Int,
                               icfun, surface_outflow::Bool=false)

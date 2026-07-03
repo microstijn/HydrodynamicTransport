@@ -521,6 +521,14 @@ end
         cc = bench_continuity_closure(; nx=12, nz=8)
         @test cc.residual_diagnosed < 1e-10
         @test cc.residual_zero_w > 1e-2                              # and is necessary
+        # B1b (rigid-lid LIMITATION): for a BAROTROPIC divergence (Σ_k HDiv ≠ 0) the diagnosed ω does
+        # NOT compensate — it can only absorb the depth-integral-zero part, so the residual stays ≈ the
+        # raw horizontal divergence (ratio ≈ 1), NOT machine zero. Documents that a uniform tracer is
+        # preserved only for depth-integrated non-divergent flow: the frozen-volume solver has no tidal
+        # breathing (real CurviLoire: ~0.5 log10 C≡1 error at the intertidal receptor). See SOLVER_VALIDATION.md.
+        bt = bench_continuity_barotropic(; nx=12, nz=8)
+        @test bt.residual_diagnosed > 0.3                           # NOT machine zero (cf. B1)
+        @test 0.7 < bt.residual_diagnosed / bt.residual_zero_w < 1.3  # ω leaves ~all of the barotropic Dtot
         # Implicit vertical upwind: 1st-order, positive.
         va = bench_vertical_advection(; resolutions=[40, 80], W=1.0, courant=0.4)
         @test fit_order([r.dz for r in va], [r.L2 for r in va]) > 0.7

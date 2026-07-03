@@ -66,6 +66,57 @@ sustained advection** and should not be used.
 a depth-integrated non-divergent flow (so a uniform tracer is preserved); the implicit vertical solve
 is 1st-order accurate and unconditionally stable where an explicit upwind would blow up.
 
+### Group B (cont.) — the rigid-lid / frozen-volume limit (added 2026-07-03)
+
+B1's machine-zero closure holds **only for a depth-integrated non-divergent flow** (`Σ_k HDiv = 0`). The
+model is **rigid-lid / frozen-volume**: `grid.volume` and `face_area_x/y` are built once from the static
+bathymetry H0 and never rebuilt from the free surface η; `state.zeta` enters only as a wet/dry gate, and on
+the real MARS3D files it is not even read (no `:zeta` autodetect pattern), so production runs with η≡0. The
+diagnosed ω pins the surface flux to zero and distributes the column divergence `Dtot` by layer thickness,
+which can only absorb the depth-integral-zero (baroclinic) part.
+
+| Case | metric | result |
+|---|---|---|
+| B1b barotropic divergence (`Σ_k HDiv ≠ 0`) | `residual_diagnosed` vs `residual_zero_w` | **0.50 / 0.50 (ratio 1.00)** — ω leaves the barotropic part **entirely uncompensated** |
+
+So a uniform tracer is **not** preserved under a barotropic (tidal) convergence: each cell keeps a residual
+divergence `(h_k/H_tot)·Dtot`, i.e. the model has no tidal breathing (no flood dilution / ebb concentration).
+Benchmark: `bench_continuity_barotropic` (`test/benchmarks/vertical_benchmarks.jl`), asserted in the Group B
+testset.
+
+**Real-grid magnitude + root-cause diagnosis (CurviLoire 2010, VILLES_MARTIN receptor, h=3.02 m, tidal
+η/H≈0.9).** Driving the production path with a uniform tracer:
+- C≡1 error at the receptor: instantaneous peak ~factor 10 (0.99 log10); **tidally-rectified ~0.52 log10**
+  (≈ the per-winter loading budget τ). Bounded and tide-phase-locked, mass-conserving (no blow-up).
+- **But this is NOT recoverable by a free-surface (breathing-sigma) refactor.** A breathing scheme was fully
+  designed and independently math-verified (three derivations: mass-conserving, C≡1-preserving under the
+  discrete GCL, positive under an implicit-vertical solve). Its precondition is discrete barotropic
+  continuity, `Σ_k HDiv = −Area·∂η/∂t`. Measured on the real field (122k cell-pairs, engine's own face
+  areas): **r(Σ_k HDiv, −Area·∂η/∂t) = −0.10, and std(Σ_k HDiv) = 1458 vs std(target) = 90 m³/s — the
+  reconstructed divergence is 16× the barotropic signal and uncorrelated with it.** Robust to C-grid
+  staggering and face-area choice; `UBRX/UBRY` in the file are near-bottom RMS diagnostics, not barotropic
+  transport.
+- **Interpretation:** the engine reconstructs `∇·u` to ~7% of the flux scale, while the tidal-breathing
+  signal is ~0.5% of it. The C≡1 error is dominated by **offline velocity-snapshot reconstruction / 30-min
+  aliasing**, not the physical dropped-∂V/∂t. This is the classic limitation of offline transport driven by
+  archived VELOCITY + SSH snapshots (`UZ/VZ` + `XE`) rather than native MASS FLUXES: you cannot reconstruct a
+  continuity-consistent free surface to the precision it needs. The rigid-lid closure is a reasonable, stable,
+  mass-conserving response to this input; the breathing refactor is not viable on this data.
+- **Consequence:** for kernel/burden products this is immaterial — the error is absorbed by the empirical
+  per-winter loading calibration, the receptor time-low-pass, and the immersion gate (the oyster is emersed
+  at low water, when the error peaks); the calibrated correlation skill is unaffected. For **absolute
+  salinity/SSC/concentration magnitudes** in the tidal-convergence / turbidity-maximum zone it is a
+  leading-order error.
+- **Native-flux data path checked (2026-07-03).** The full MARS3D files (150 GB/yr, local) DO contain the
+  **barotropic velocity `U/V`** ("barotropic zonal/meridional velocity") — the mode that drives η, which the
+  offline engine does NOT read (it uses 3D `UZ/VZ`). Tested whether `Σ HDiv(U/V·D)` closes continuity vs
+  `−Area·∂η/∂t`: **it does NOT — r ≈ −0.13, std 13× the target, essentially the same failure as `UZ/VZ`.**
+  The grid is unrotated (`angle=0`), so it's not a rotation bug; the most likely cause is **temporal aliasing
+  of the fast barotropic mode by 30-min snapshots** (and/or residual staggered-metric reconstruction). The
+  archive has **no native mass fluxes and no vertical velocity**. ⇒ magnitude fidelity is not reachable from
+  this archive; it needs a **MARS3D re-run that outputs native time-integrated transports/fluxes**, not a
+  solver change.
+
 ### Group C — diffusion (explicit horizontal, Crank–Nicolson vertical)
 
 | Case | metric | result |
@@ -92,5 +143,12 @@ Results CSVs:
 - Mass-conservation drift is Float32-storage-limited (~1e-5–1e-8 relative), not Float64 machine zero.
 - Group B/C vertical cases run on the non-sigma unit column (`dz=1/nz`); the sigma-grid physical-`dz`
   path is covered separately by `validate_sigma.jl`.
+- **Rigid-lid / frozen-volume (see "Group B (cont.)"):** no tidal breathing; B1's uniform-tracer
+  preservation holds only for depth-integral-zero flows. On the real macrotidal grid this is a ~0.5 log10
+  C≡1 error at the intertidal receptor, dominated by offline velocity-snapshot reconstruction (Σ_k HDiv is
+  16× the barotropic signal, uncorrelated with ∂η/∂t) — an input-data limit, not fixable by a free-surface
+  refactor. Immaterial for the calibrated burden products; matters for absolute salinity/SSC magnitudes.
 - Not covered here (future): the LeVeque deformational-swirl test; comparison against MARS3D **native**
-  tracer output on the real CurviLoire grid.
+  tracer output on the real CurviLoire grid; a continuity-consistent free-surface transport (needs MARS3D
+  native mass fluxes — the archived `UZ/VZ`, `XE`, AND barotropic `U/V` snapshots all fail discrete
+  continuity, so a re-run with flux output is required).

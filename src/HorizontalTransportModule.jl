@@ -525,7 +525,7 @@ end
 
 # Monotone PPM edge values for q[1:m] (4th-order face value, edge-monotonized + Colella-Woodward
 # limiter -> strictly monotone, positivity-preserving). Writes cL, cR (per-cell left/right edges).
-function _ffsl_ppm_edges!(cL::Vector{Float64}, cR::Vector{Float64}, q::Vector{Float64}, m::Int)
+function _ffsl_ppm_edges!(cL::AbstractVector, cR::AbstractVector, q::AbstractVector, m::Int)
     @inbounds for f in 1:m
         jm1 = f > 1 ? f-1 : 1; jp1 = f < m ? f+1 : m; jp2 = f+2 <= m ? f+2 : m
         aface = (7.0/12.0)*(q[f] + q[jp1]) - (1.0/12.0)*(q[jm1] + q[jp2])  # value at face f+1/2
@@ -726,6 +726,113 @@ function advect_y_ffsl!(C_out, C_in, state::State, grid::AbstractGrid, dt, D_cri
             C_out[ig, g, k] = cnew[g]
         end
     end
+end
+
+# ==============================================================================
+# --- BREATHING FFSL (two-time-level, volume-coordinate) — opt-in continuity correction ---
+# The rigid-lid FFSL above divides by the single static `grid.volume`. The breathing variant works
+# in the water-VOLUME coordinate with a DEPARTURE→ARRIVAL volume split (the CWC / cascade
+# construction, plan §1-2): mass = C·V_departure is fluxed by the CORRECTED transport, and the
+# divide + FCT bounds use the ARRIVAL intermediate volume. The swept region is measured directly in
+# VOLUME (accumulate departure cell volumes until the corrected swept volume U*·dt is reached), so
+# `varr[g] = vdep[g] − (S[g]−S[g-1])` is EXACT and a uniform tracer is preserved to machine precision
+# at any Courant with NO horizontal sub-stepping. This is the "single source of truth for face
+# transport": the volume increment and the tracer mass flux use the identical swept region S.
+# ==============================================================================
+
+# Breathing FFSL mass flux across face `f` (between cells f and f+1) for a SIGNED swept volume
+# `S = U*_face·dt` [m³] (positive = +axis). Volume-coordinate walk: accumulate DEPARTURE cell volumes
+# `vdep` upstream of the face until |S| is reached — whole cells contribute their full mass `C·V`,
+# the final fractional cell contributes `V·(PPM integral over its swept volume fraction)`. `low=true`
+# uses the cell mean (donor-cell) instead of the parabola (the monotone FCT base).
+#
+# AMBIENT (open-BC, plan §5): the walk STOPS at the domain edge (idx off [1,m]) OR at a land/dry cell
+# (`vdep ≤ 0` — a wall), filling the remaining swept volume with the ambient concentration `camb`.
+# This is REQUIRED for consistency with the arrival volume `varr = vdep − ΔS` (which uses the full S):
+# whatever volume the walk cannot source from interior water must be filled, or mass and volume
+# disagree and the divide blows up near boundaries. `camb = 1` ⇒ a uniform tracer is preserved exactly
+# everywhere; `camb = 0` ⇒ clean-ocean inflow for the pathogen tracer (river/salinity set it per-end).
+@inline function _ffsl_flux_breathing(cL, cR, C, vdep, m::Int, f::Int, S::Float64, low::Bool,
+                                      camb::Float64=0.0)
+    S == 0.0 && return 0.0
+    if S > 0.0
+        rem = S; s = 0.0; idx = f
+        @inbounds while rem > 0.0
+            if idx < 1; s += camb * rem; break; end        # exited the domain -> ambient
+            Vi = vdep[idx]
+            if Vi <= 0.0; s += camb * rem; break; end       # land/dry wall -> ambient beyond
+            if Vi <= rem
+                s += C[idx] * Vi                            # whole cell swept (full mass)
+                rem -= Vi; idx -= 1
+            else
+                frac = rem / Vi                             # swept fraction of cell idx, from its RIGHT edge
+                s += low ? C[idx] * rem : Vi * _ffsl_fr(cL[idx], cR[idx], C[idx], frac)
+                rem = 0.0
+            end
+        end
+        return s
+    else
+        rem = -S; s = 0.0; idx = f + 1
+        @inbounds while rem > 0.0
+            if idx > m; s += camb * rem; break; end
+            Vi = vdep[idx]
+            if Vi <= 0.0; s += camb * rem; break; end
+            if Vi <= rem
+                s += C[idx] * Vi
+                rem -= Vi; idx += 1
+            else
+                frac = rem / Vi                             # from the LEFT edge
+                s += low ? C[idx] * rem : Vi * _ffsl_fl(cL[idx], cR[idx], C[idx], frac)
+                rem = 0.0
+            end
+        end
+        return -s
+    end
+end
+
+# One breathing FCT flux-form SL sweep along a line of `m` cells. `crow` = C^departure, `vdep` =
+# departure volumes, `Srow[f]` = signed swept volume U*_face·dt across face f (0 at the boundary face
+# m). Writes the arrival volumes into `varr` (= vdep − ΔS, the next sweep's departure) and the updated
+# mixing ratio for physical cells into `cnew`. Monotone donor base + PPM antidiffusive correction,
+# Zalesak-limited to the local neighbour min/max; conservative (fluxes telescope), positive, C≡1-exact.
+function _ffsl_line_breathing!(cnew, crow, vdep, varr, Srow, cL, cR, Flo, Fhi, Ctd, Rp, Rm,
+                               m::Int, ng::Int, nphys::Int; camb::Float64=0.0)
+    _ffsl_ppm_edges!(cL, cR, crow, m)
+    @inbounds for g in 2:m-1
+        varr[g] = vdep[g] - (Srow[g] - Srow[g-1])
+    end
+    @inbounds varr[1] = vdep[1]; varr[m] = vdep[m]
+    @inbounds for f in 1:m-1
+        S = Float64(Srow[f])
+        Flo[f] = _ffsl_flux_breathing(cL, cR, crow, vdep, m, f, S, true, camb)
+        Fhi[f] = _ffsl_flux_breathing(cL, cR, crow, vdep, m, f, S, false, camb)
+    end
+    @inbounds Flo[m] = 0.0; Fhi[m] = 0.0
+    @inbounds for g in 2:m-1
+        vg = varr[g]
+        Ctd[g] = vg > 0.0 ? (vdep[g]*crow[g] - (Flo[g] - Flo[g-1])) / vg : crow[g]
+    end
+    @inbounds Ctd[1] = crow[1]; Ctd[m] = crow[m]
+    @inbounds for g in 2:m-1
+        cmax = max(crow[g-1], crow[g], crow[g+1], Ctd[g-1], Ctd[g], Ctd[g+1])
+        cmin = min(crow[g-1], crow[g], crow[g+1], Ctd[g-1], Ctd[g], Ctd[g+1])
+        AL = Fhi[g-1] - Flo[g-1]; AR = Fhi[g] - Flo[g]
+        Pp = max(0.0, AL) + max(0.0, -AR)
+        Pm = max(0.0, AR) + max(0.0, -AL)
+        Qp = (cmax - Ctd[g]) * varr[g]
+        Qm = (Ctd[g] - cmin) * varr[g]
+        Rp[g] = Pp > 0.0 ? min(1.0, Qp/Pp) : 0.0
+        Rm[g] = Pm > 0.0 ? min(1.0, Qm/Pm) : 0.0
+    end
+    @inbounds Rp[1]=0.0; Rm[1]=0.0; Rp[m]=0.0; Rm[m]=0.0
+    @inbounds for ip in 1:nphys
+        g = ip + ng
+        AR = Fhi[g] - Flo[g]; AL = Fhi[g-1] - Flo[g-1]
+        cR_lim = AR >= 0.0 ? min(Rp[g+1], Rm[g]) : min(Rp[g], Rm[g+1])
+        cL_lim = AL >= 0.0 ? min(Rp[g], Rm[g-1]) : min(Rp[g-1], Rm[g])
+        cnew[g] = varr[g] > 0.0 ? Ctd[g] - (cR_lim*AR - cL_lim*AL) / varr[g] : Ctd[g]
+    end
+    return nothing
 end
 
 # ==============================================================================

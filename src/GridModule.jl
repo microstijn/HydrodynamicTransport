@@ -2,7 +2,7 @@
 
 module GridModule
 
-export initialize_cartesian_grid, initialize_curvilinear_grid
+export initialize_cartesian_grid, initialize_curvilinear_grid, rebuild_metrics!
 
 using ..HydrodynamicTransport.ModelStructs
 using StaticArrays
@@ -162,13 +162,46 @@ function initialize_curvilinear_grid(netcdf_filepath::String; ng::Int=2, min_dep
     # For a non-sigma grid Draw=Dvol=1 everywhere, so the metrics are unchanged from the uniform case.
     Draw = is_sigma ? h_full : ones(Float64, nx_tot, ny_tot)
     Dvol = is_sigma ? [Draw[i,j] > 0.0 ? Draw[i,j] : 1.0 for i in 1:nx_tot, j in 1:ny_tot] : Draw
+    _fill_sigma_metrics!(volume, face_area_x, face_area_y, pm_full, pn_full, dz, Draw, Dvol)
+    return CurvilinearGrid(ng, nx_rho, ny_rho, nz, lon_rho_full, lat_rho_full, lon_u_full, lat_u_full, lon_v_full, lat_v_full, z_w, pm_full, pn_full, angle_full, h_full, mask_rho_full, mask_u_full, mask_v_full, face_area_x, face_area_y, volume)
+end
+
+# Fill `volume`, `face_area_x`, `face_area_y` from a per-column FACE depth `Draw` and VOLUME depth
+# `Dvol` (both padded, [m]). `dz` is the sigma spacing Δσ_k (dimensionless on a sigma grid, or Δz [m]
+# on ROMS/legacy). Face height uses the MIN of the two neighbouring FACE depths (`Draw`): conservative
+# (shared area), exactly zero over land, and keeps face_area/volume ≤ pm so the advective-CFL estimate
+# stays a valid upper bound on a sigma grid. `Dvol` floors dry cells so every cell keeps a strictly
+# positive volume (the divide-by-volume kernels rely on that). This is the single source of truth for
+# the sigma metric, shared by `initialize_curvilinear_grid` and `rebuild_metrics!` (breathing mode).
+function _fill_sigma_metrics!(volume, face_area_x, face_area_y, pm_full, pn_full, dz, Draw, Dvol)
+    nx_tot, ny_tot, nz = size(volume, 1), size(volume, 2), size(volume, 3)
     facedepth(a, b) = min(a, b)
     for k in 1:nz
         for j in 1:ny_tot, i in 1:nx_tot; volume[i,j,k] = (1/pm_full[i,j]) * (1/pn_full[i,j]) * abs(dz[k]) * Dvol[i,j]; end
         for j in 1:ny_tot, i in 1:nx_tot+1; dy_local = (i > 1 && i <= nx_tot) ? 0.5 * (1/pn_full[i-1,j] + 1/pn_full[i,j]) : 1/pn_full[min(i, nx_tot), j]; Df = (i > 1 && i <= nx_tot) ? facedepth(Draw[i-1,j], Draw[i,j]) : Draw[min(i, nx_tot), j]; face_area_x[i,j,k] = dy_local * abs(dz[k]) * Df; end
         for j in 1:ny_tot+1, i in 1:nx_tot; dx_local = (j > 1 && j <= ny_tot) ? 0.5 * (1/pm_full[i,j-1] + 1/pm_full[i,j]) : 1/pm_full[i, min(j, ny_tot)]; Df = (j > 1 && j <= ny_tot) ? facedepth(Draw[i,j-1], Draw[i,j]) : Draw[i, min(j, ny_tot)]; face_area_y[i,j,k] = dx_local * abs(dz[k]) * Df; end
     end
-    return CurvilinearGrid(ng, nx_rho, ny_rho, nz, lon_rho_full, lat_rho_full, lon_u_full, lat_u_full, lon_v_full, lat_v_full, z_w, pm_full, pn_full, angle_full, h_full, mask_rho_full, mask_u_full, mask_v_full, face_area_x, face_area_y, volume)
+    return nothing
+end
+
+"""
+    rebuild_metrics!(grid, depth; d_floor=1.0)
+
+Recompute `grid.volume`, `grid.face_area_x`, `grid.face_area_y` IN PLACE from a breathing per-column
+total water depth `depth` (padded `nx_tot × ny_tot`, [m]; 0 over land, ≥ D_min on wet cells). Used by
+the OPT-IN breathing-sigma mode each hydro read so the sigma metric tracks the free surface
+`D̃ = H0 + η` instead of being frozen at the reference bathymetry H0. Face depths use the min-face
+convention (zero over land ⇒ no coastal flux); dry columns are floored to `d_floor` for a strictly
+positive volume. The sigma spacing Δσ_k is recovered from `grid.z_w`. Mutates only the three metric
+arrays; the topology (masks, pm/pn) is unchanged.
+"""
+function rebuild_metrics!(grid::CurvilinearGrid, depth::AbstractMatrix; d_floor::Float64=1.0)
+    nx_tot, ny_tot = size(grid.pm)
+    @assert size(depth) == (nx_tot, ny_tot) "depth must be padded ($nx_tot×$ny_tot), got $(size(depth))"
+    dz = [grid.z_w[k+1] - grid.z_w[k] for k in 1:grid.nz]
+    Dvol = [depth[i,j] > 0.0 ? depth[i,j] : d_floor for i in 1:nx_tot, j in 1:ny_tot]
+    _fill_sigma_metrics!(grid.volume, grid.face_area_x, grid.face_area_y, grid.pm, grid.pn, dz, depth, Dvol)
+    return grid
 end
 
 end # module GridModule

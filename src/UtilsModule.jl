@@ -302,6 +302,11 @@ function create_hydrodynamic_data_from_file(filepath::String)
         :v => [("standard_name", "sea_water_y_velocity"), ("long_name", "v-velocity"), ("var_name", ("vz", "v", "V"))],
         :salt => [("standard_name", "sea_water_salinity"), ("long_name", "salinity"), ("var_name", ("salt", "sal", "SAL"))],
         :temp => [("standard_name", "sea_water_potential_temperature"), ("long_name", "temperature"), ("var_name", ("temp", "TEMP"))],
+        # Free surface (η). Absent here was the root of the rigid-lid ζ≡0: without it the offline solver
+        # never sees the sea surface and cannot breathe. MARS3D stores it as `XE`
+        # (standard_name sea_surface_height_above_sea_level); also accept ROMS/CMEMS `zeta`/`ssh`/`zos`.
+        :zeta => [("standard_name", "sea_surface_height"), ("standard_name", "sea_surface_elevation"),
+                  ("long_name", "sea surface height"), ("var_name", ("xe", "zeta", "ssh", "zos", "sossheig", "ssh_ib"))],
         :time => [("standard_name", "time"), ("long_name", "time"), ("var_name", ("time", "ocean_time"))]
     )
     

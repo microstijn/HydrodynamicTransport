@@ -5,6 +5,8 @@ module HydrodynamicsModule
 export update_hydrodynamics!, update_hydrodynamics_placeholder!, diagnose_vertical_velocity!
 
 using ..HydrodynamicTransport.ModelStructs
+using ..HydrodynamicTransport.ProjectionModule
+using ..HydrodynamicTransport.GridModule: rebuild_metrics!
 using NCDatasets
 using Dates
 using Base.Threads: @threads
@@ -161,9 +163,11 @@ function diagnose_vertical_velocity!(state::State, grid::CurvilinearGrid)
     return nothing
 end
 
-function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64; diagnose_w::Bool=true)
+function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64;
+                               diagnose_w::Bool=true, projector::Union{Nothing,BreathingProjector}=nothing)
     ng = grid.ng
     cache = hydro_data.cache
+    breathing = projector !== nothing
 
     # Convert the time axis once, then reuse from the cache.
     if cache.time_seconds === nothing
@@ -197,6 +201,10 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
     slabs1 = cache.slabs[idx1]; slabs2 = cache.slabs[idx2]
     for (state_field, standard_name, has_z) in fields
         haskey(slabs1, standard_name) || continue
+        # Rigid-lid default keeps state.zeta ≡ 0 (bit-identical: the transport kernels read `h + zeta`
+        # face depths, so populating it would change the frozen-volume results). Breathing mode reads
+        # the true free surface into state.zeta.
+        (standard_name === :zeta && !breathing) && continue
         data_slice1 = slabs1[standard_name]
         if has_z
             nx_phys, ny_phys, nz_phys = size(data_slice1)
@@ -216,9 +224,37 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
             end
         end
     end
-    # Files store no w/omega -> diagnose the vertical velocity from continuity so the sigma
-    # transport has vertical advection (and preserves a uniform tracer). Disable with diagnose_w=false.
-    diagnose_w && diagnose_vertical_velocity!(state, grid)
+    if breathing
+        # OPT-IN breathing-sigma continuity correction: solve the barotropic projection once per hydro
+        # read, breathe the sigma metric to the free surface, and set the GCL ω (replaces the rigid-lid
+        # w-diagnosis). See ProjectionModule + the plan.
+        _breathing_update!(state, grid, projector, cache, idx1, idx2, time_dim_seconds)
+    elseif diagnose_w
+        # Files store no w/omega -> diagnose the vertical velocity from continuity so the sigma
+        # transport has vertical advection (and preserves a uniform tracer). Disable with diagnose_w=false.
+        diagnose_vertical_velocity!(state, grid)
+    end
+    return nothing
+end
+
+# Breathing-sigma per-read update: project the barotropic transport onto discrete continuity vs the
+# free surface, rebuild the sigma metric so volumes breathe, and write the GCL vertical flux ω into
+# state.w. Solved ONCE per hydro bracket (cadence guard `projector.last_idx`); intermediate adaptive
+# steps and rejected trials reuse the cached projection. At the clamped file ends (idx2==idx1) there
+# is no interval, so the previous projection is retained.
+function _breathing_update!(state::State, grid::CurvilinearGrid, projector::BreathingProjector,
+                            cache::HydroSlabCache, idx1::Int, idx2::Int, tsec::Vector{Float64})
+    slabs1 = cache.slabs[idx1]; slabs2 = cache.slabs[idx2]
+    haskey(slabs1, :zeta) ||
+        error("breathing mode requires a free surface (zeta/XE) in the hydro file; none detected")
+    if idx2 != idx1 && projector.last_idx != idx1
+        eta_n = slabs1[:zeta]; eta_np1 = slabs2[:zeta]
+        dt = tsec[idx2] - tsec[idx1]
+        project!(projector, grid, state.u, state.v, eta_n, eta_np1, dt)
+        rebuild_metrics!(grid, padded_depth!(projector, grid); d_floor=1.0)
+        write_omega_velocity!(projector, grid, state)
+        projector.last_idx = idx1
+    end
     return nothing
 end
 

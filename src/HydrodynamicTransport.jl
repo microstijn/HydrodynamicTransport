@@ -5,8 +5,9 @@ module HydrodynamicTransport
 # --- 1. Include all source files to define the modules ---
 include("ModelStructs.jl")
 include("GridModule.jl")
+include("ProjectionModule.jl")
 include("StateModule.jl")
-include("UtilsModule.jl") 
+include("UtilsModule.jl")
 include("FluxLimitersModule.jl")
 include("VectorOperationsModule.jl")
 include("BoundaryConditionsModule.jl")
@@ -30,6 +31,7 @@ include("TimeSteppingModule.jl")
 # Bring the contents of the modules into the main module's scope ---
 using .ModelStructs
 using .GridModule
+using .ProjectionModule
 using .StateModule
 using .VectorOperationsModule
 using .FluxLimitersModule
@@ -55,7 +57,10 @@ export AbstractGrid, CartesianGrid, CurvilinearGrid, State, HydrodynamicData, Po
 export ReceptorMonitor, create_receptor_monitor_from_lonlat, create_receptor_monitor_from_xy, flush_receptor_monitor!
 
 # Functions from GridModule.jl
-export initialize_cartesian_grid, initialize_curvilinear_grid
+export initialize_cartesian_grid, initialize_curvilinear_grid, rebuild_metrics!
+
+# Functions/types from ProjectionModule.jl (opt-in breathing-sigma continuity correction)
+export BreathingProjector, build_projector, project!, padded_depth!, write_omega_velocity!
 
 # Functions from StateModule.jl
 export initialize_state

@@ -256,11 +256,33 @@ improving any single sweep.
 ⇒ **This CORRECTS §2 / the Improvement-1 memory attribution** ("floor = O(dt) vertical backward-Euler"): the
 vertical is near-identity at the deep support and its scheme is irrelevant to the floor. The kernel/column
 adjoints ARE machine-precision (horizontal 2e-16, vertical 7e-12); the COMPOSED full-3D real-run reverse-time
-reciprocity floors at ~1e-4. Machine-precision FULL-3D reciprocity would need a TAPED adjoint (store the
-forward trajectory, apply the exact transpose backward — vs the current solver-mode negate-velocity re-run)
-OR an all-closed-boundary config. vffsl is committed as the correct, opt-in exactly-adjoint vertical
-(unconditionally stable, higher-order) for when that is pursued; the ~1e-4 solver-mode floor is documented as
-the realistic reverse-time reciprocity for the Gate-1 product.
+reciprocity floors at ~1e-4. vffsl is committed as the correct, opt-in exactly-adjoint vertical.
+
+### ROOT CAUSE of the ~1.5e-4 floor — PINNED (2026-07-04, taped-adjoint investigation)
+
+Taped-adjoint approach vetted by **3 fresh math agents (unanimous)** + empirical on-grid diagnosis:
+- **The taped discrete transpose gives machine-precision reciprocity BY CONSTRUCTION** for linear mode (FCT
+  off ⇒ genuinely linear, C-independent coefficients). **No tracer-trajectory tape** needed.
+- **The open-boundary `camb` and the Strang split-commutator are RED HERRINGS** — both provably exact adjoints
+  (single open FFSL sweep self-adjoint to 0.0; palindrome preserves order under transposition). My §3b guess
+  (split/camb) was WRONG; a boundary-adjoint patch is a rank-0 no-op.
+- **THE ACTUAL O(dt) SOURCE (empirically pinned):** `_update_cascade_volumes!` RESETS the sub-step departure
+  volume from η (uniform-Δσ) every sub-step, but the forward's ARRIVAL volume carries the `divx`/`divy`/`ω`
+  redistribution from the sweeps. The reverse recomputes its departure from η ⇒ it does NOT reproduce the
+  forward's redistributed arrival. Measured on the real grid: transports & ω mirror EXACTLY (0.0) but the
+  cascade volumes mismatch **7.85e-3 = dt/(2·dTread)** per sub-step (`V1_rev` vs `V4_fwd`), independent of the
+  reverse `f0`. This is why vffsl didn't help (it fixes the z-SWEEP, not the η-reset of the departure VOLUME),
+  and why Float32≡Float64 / Kz / partition / parking all tested clean.
+
+**THE FIX (Improvement 4, NOT yet implemented — the vetted path to 1e-15 3-D reciprocity):** the reverse must
+DEPART from the forward's EXACT redistributed arrival volume, not the η-reset. Routes: (1) **consistent
+volume-threading** — thread the cascade volume within a read (`V0_substep = previous arrival`, reset only at
+read boundaries) in BOTH directions ⇒ exact mirror; ⚠ changes the FORWARD ⇒ not bit-identical ⇒ re-validate
+C≡1 (still algebraic-exact)/salinity-49×/burden; no memory cost; recommended (opt-in). (2) **windowed volume
+tape** — forward stores the arrival-volume chain, reverse replays it; ~12 GB for a 2 h full-grid window,
+keeps the forward untouched. Fully-general fallback = the taped exact sweep transpose `M* = I −
+diag(1/d)·Wᵀ·Δᵀ` (scatter). Kernel/column adjoints are already machine-precision; only the cascade volume
+threading blocks full-3D machine-precision reverse-time reciprocity.
 
 ---
 

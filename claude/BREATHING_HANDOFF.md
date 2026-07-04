@@ -1,10 +1,28 @@
 # Breathing-sigma — session handoff (continue here)
 
-Self-contained continuation notes. Branch **`previr`** (HydrodynamicTransport). The breathing-sigma
-continuity correction is **complete and validated end-to-end** (forward magnitude fix + reverse-time
-adjoint). This session's job: two **refinements** (machine-precision reciprocity; wet/dry parking),
-then **Phase 5** (kernel re-baseline). Read alongside `SESSION_HANDOFF.md` (the older FFSL/opt notes)
-and the PoC oracle `breathing_sigma_poc/README.md`.
+Self-contained continuation notes. Branch **`previr`** (HydrodynamicTransport). Read alongside
+`SESSION_HANDOFF.md` (the older FFSL/opt notes) and the PoC oracle `breathing_sigma_poc/README.md`.
+
+## ⇒ START HERE (updated 2026-07-04)
+
+The forward breathing fix + all THREE requested refinements are **DONE + committed** (suite 149/149,
+each opt-in default bit-identical):
+- **Improvement 1** — linear exact-adjoint breathing mode (`breathing_linear`), commit `d4de909`. §2.
+- **Improvement 2** — wet/dry parking (`breathing_parking`), commit `2ea2519`. §3.
+- **Improvement 3** — vertical FFSL (`breathing_vffsl`), commit `3b71a46`. §3b.
+
+**NEXT TASK = Improvement 4 (volume-threading)** — the ONE remaining thing blocking machine-precision
+(1e-15) full-3D reverse-time reciprocity. The root cause is **PINNED** (commit `f64107a`, see the "ROOT
+CAUSE" block in §3b): the cascade RESETS its sub-step departure volume from η (uniform-Δσ) every
+sub-step, but the forward ARRIVAL volume carries the `divx/divy/ω` redistribution, and the reverse
+recomputes from η so it can't mirror it (measured mismatch **7.85e-3 = dt/(2·dTread)**; transports & ω
+mirror exactly). The taped adjoint was 3-agent-vetted (machine-precision by construction; camb boundary &
+Strang split are RED HERRINGS). **Fix = consistent volume-threading** (opt-in `breathing_thread_volumes`:
+thread `V0_substep = previous arrival`, reset only at read boundaries, both directions ⇒ exact mirror; no
+memory cost). ⚠ it changes the FORWARD ⇒ NOT bit-identical ⇒ re-validate C≡1 (still algebraic-exact),
+salinity-49×, and the calibrated burden. Alt = windowed volume tape (~12 GB/2h, forward untouched).
+
+Then **Phase 5** (§4): kernel-library re-baseline on the 160 GB grid (cluster), driven from softMode C2.
 
 ---
 

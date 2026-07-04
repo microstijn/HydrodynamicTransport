@@ -54,11 +54,16 @@ mutable struct BreathingProjector
     h_open::Float64          # deep-mouth Dirichlet threshold [m]
     wet_min::Float64         # bathymetry wet threshold [m]
     D_min::Float64           # floor on the total water depth D̃ [m]
-    # --- static topology ---
+    # --- wet/dry parking (opt-in) ---
+    parking::Bool            # dynamic wet/dry parking on? (false = static topology, bit-identical)
+    D_park::Float64          # park a wet cell whose min(Hn,Hnp) < D_park (> D_min)
+    parked::BitMatrix        # (nx,ny) cells frozen this read (shallow OR mouth-disconnected). walls.
+    # --- topology (STATIC when parking=false; the wet/isopen masks + metrics are always static, but
+    #     reach/active/id/N are RECOMPUTED per read when parking=true — the parked set is dynamic) ---
     wet::BitMatrix           # (nx,ny) mask_rho ∧ h>wet_min
     isopen::BitMatrix        # deep-mouth Dirichlet cells (φ=0)
-    reach::BitMatrix         # mouth-connected wet component
-    active::BitMatrix        # interior unknowns (wet ∧ reach ∧ ¬isopen)
+    reach::BitMatrix         # mouth-connected component (of `wet`, or `wet∧¬parked` when parking)
+    active::BitMatrix        # interior unknowns (reach ∧ ¬isopen ∧ ¬parked)
     id::Matrix{Int}          # (nx,ny) → unknown index (0 if not an unknown)
     N::Int                   # number of unknowns
     # --- horizontal metrics (physical cells) ---
@@ -88,6 +93,9 @@ end
 @inline _wet(p::BreathingProjector, i, j) = _inb(p, i, j) && @inbounds(p.wet[i, j])
 @inline _isopen(p::BreathingProjector, i, j) = _inb(p, i, j) && @inbounds(p.isopen[i, j])
 @inline _active(p::BreathingProjector, i, j) = _inb(p, i, j) && @inbounds(p.active[i, j])
+@inline _parked(p::BreathingProjector, i, j) = _inb(p, i, j) && @inbounds(p.parked[i, j])
+# transportable = wet and NOT parked; faces are open to transport only between two transportable cells.
+@inline _transp(p::BreathingProjector, i, j) = _inb(p, i, j) && @inbounds(p.wet[i, j] && !p.parked[i, j])
 
 # Depth of cell (i,j) — floored total water depth (0 over land). Read from proj.D (filled per read).
 @inline _Dc(p::BreathingProjector, i, j) = _wet(p, i, j) ? @inbounds(p.D[i, j]) : 0.0
@@ -112,7 +120,7 @@ the horizontal metrics. This is done ONCE per simulation; the geometry-dependent
 (re)assembled per hydro read inside [`project!`](@ref) because its coefficient `D̃` breathes with η.
 """
 function build_projector(grid::CurvilinearGrid; h_open::Float64=30.0, wet_min::Float64=1.0,
-                         D_min::Float64=0.1)
+                         D_min::Float64=0.1, parking::Bool=false, D_park::Float64=0.5)
     ng, nx, ny, nz = grid.ng, grid.nx, grid.ny, grid.nz
 
     wet = falses(nx, ny)
@@ -127,28 +135,6 @@ function build_projector(grid::CurvilinearGrid; h_open::Float64=30.0, wet_min::F
                             (j > 1  && wet[i, j-1]) && (j < ny && wet[i, j+1]) )
         isopen[i, j] = touches_nonwet && grid.h[i+ng, j+ng] > h_open
     end
-    # flood-fill the wet component connected to the open (mouth) boundary
-    reach = falses(nx, ny)
-    stack = Tuple{Int,Int}[]
-    @inbounds for j in 1:ny, i in 1:nx
-        if isopen[i, j]; reach[i, j] = true; push!(stack, (i, j)); end
-    end
-    while !isempty(stack)
-        (i, j) = pop!(stack)
-        for (ni, nj) in ((i+1, j), (i-1, j), (i, j+1), (i, j-1))
-            if 1 <= ni <= nx && 1 <= nj <= ny && wet[ni, nj] && !reach[ni, nj]
-                reach[ni, nj] = true; push!(stack, (ni, nj))
-            end
-        end
-    end
-    active = falses(nx, ny)
-    @inbounds for j in 1:ny, i in 1:nx
-        active[i, j] = wet[i, j] && reach[i, j] && !isopen[i, j]
-    end
-    id = zeros(Int, nx, ny); N = 0
-    @inbounds for j in 1:ny, i in 1:nx
-        if active[i, j]; N += 1; id[i, j] = N; end
-    end
 
     dxo = Matrix{Float64}(undef, nx, ny); dyo = Matrix{Float64}(undef, nx, ny)
     @inbounds for j in 1:ny, i in 1:nx
@@ -157,14 +143,57 @@ function build_projector(grid::CurvilinearGrid; h_open::Float64=30.0, wet_min::F
     # Δσ_k from the sigma interfaces (Σ = 1 on a sigma grid, spanning [-1,0]).
     dsig = Float64[grid.z_w[k+1] - grid.z_w[k] for k in 1:nz]
 
+    # N_max = all-wet interior count sizes the RHS scratch; the per-read active count N ≤ N_max.
+    Nmax = count(wet) - count(isopen)
     nx_tot, ny_tot = size(grid.pm)
-    return BreathingProjector(nx, ny, nz, ng, h_open, wet_min, D_min,
-        wet, isopen, reach, active, id, N,
+    proj = BreathingProjector(nx, ny, nz, ng, h_open, wet_min, D_min,
+        parking, D_park, falses(nx, ny),
+        wet, isopen, falses(nx, ny), falses(nx, ny), zeros(Int, nx, ny), 0,
         dxo, dyo, dsig,
         zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny),
         zeros(nx+1, ny, nz), zeros(nx, ny+1, nz), zeros(nx, ny, nz+1),
         zeros(nx_tot, ny_tot), -1, 0.0, 0.0,
-        zeros(N))
+        zeros(max(Nmax, 0)))
+    # Static topology with an empty parked set (parking=false keeps this every read — bit-identical).
+    _flood_and_number!(proj)
+    return proj
+end
+
+# (Re)compute the mouth-connected component + interior-unknown numbering from the CURRENT transportable
+# set `wet ∧ ¬parked`. `isopen` (deep mouth) never parks and seeds the flood-fill. Any transportable cell
+# the single global flood-fill does NOT reach is mouth-disconnected — it is folded into `parked` (a wall):
+# a breathing Neumann island has Σ(T−Draw) = −ΔV_pool/Δt ≠ 0 (unsolvable) and adds a constant null-vector
+# (singular), so parking it is required for a well-posed SPD system (agent-vetted). Removing non-reachable
+# cells cannot disconnect reachable ones (reachability is monotone) ⇒ ONE pass is a fixed point, no
+# iteration. Fills proj.reach, proj.active, proj.id, proj.N; extends proj.parked with the disconnected set.
+function _flood_and_number!(proj::BreathingProjector)
+    nx, ny = proj.nx, proj.ny
+    wet, isopen, parked = proj.wet, proj.isopen, proj.parked
+    reach = proj.reach; fill!(reach, false)
+    stack = Tuple{Int,Int}[]
+    @inbounds for j in 1:ny, i in 1:nx
+        if isopen[i, j]; reach[i, j] = true; push!(stack, (i, j)); end
+    end
+    while !isempty(stack)
+        (i, j) = pop!(stack)
+        for (ni, nj) in ((i+1, j), (i-1, j), (i, j+1), (i, j-1))
+            if 1 <= ni <= nx && 1 <= nj <= ny && wet[ni, nj] && !parked[ni, nj] && !reach[ni, nj]
+                reach[ni, nj] = true; push!(stack, (ni, nj))
+            end
+        end
+    end
+    active = proj.active; id = proj.id
+    fill!(active, false); fill!(id, 0); N = 0
+    @inbounds for j in 1:ny, i in 1:nx
+        active[i, j] = reach[i, j] && !isopen[i, j] && !parked[i, j]
+        if active[i, j]; N += 1; id[i, j] = N; end
+        # PARKING ONLY: fold mouth-disconnected transportable cells into the parked (wall) set so their
+        # faces get zeroed (a breathing Neumann island is otherwise unsolvable). Not done when parking is
+        # off — there disconnected wet cells keep the legacy raw-transport treatment (bit-identical).
+        if proj.parking && wet[i, j] && !isopen[i, j] && !reach[i, j]; parked[i, j] = true; end
+    end
+    proj.N = N
+    return proj
 end
 
 """
@@ -200,21 +229,38 @@ function project!(proj::BreathingProjector, grid::CurvilinearGrid,
         end
     end
 
+    # WET/DRY PARKING (opt-in): freeze cells that go shallow during this read + any cell the parking
+    # disconnects from the mouth. The mask is a pure function of the (floored) depths min(Hn,Hnp) — which
+    # is SWAP-INVARIANT under the reverse-time Hn↔Hnp swap, so forward and reverse project the identical
+    # mask automatically (agent-vetted). Parked cells become no-flux walls: excluded from the Poisson
+    # unknowns, their raw face transports zeroed (so Draw is masked consistently — the load-bearing bug to
+    # avoid), and frozen (V0=0, C held) in the cascade. min(Hn,Hnp) < D_park (> D_min) also guarantees
+    # every active cell has strictly positive face depths ⇒ SPD. Recompute the reach/active/id topology.
+    if proj.parking
+        parked = proj.parked; fill!(parked, false)
+        @inbounds for j in 1:ny, i in 1:nx
+            parked[i, j] = proj.wet[i, j] && min(Hn[i, j], Hnp[i, j]) < proj.D_park
+        end
+        _flood_and_number!(proj)   # re-flood-fill on wet∧¬parked; folds mouth-disconnected cells into parked
+    end
+
     # RAW per-layer face transports (uncorrected). Single-valued per face: the west face of cell
     # (i,j) uses the face-averaged transverse length and the min face depth. Building the raw transport
     # FIRST — then deriving Draw as its exact discrete divergence — is what makes Draw, the Poisson
     # stencil, and the corrected transport mutually consistent, so div(U*) = T to solver tolerance and
     # the GCL ω closes at the surface to machine zero. (The PoC computed Draw with the cell-centred
     # metric, which is only self-consistent on a uniform grid; it never tested the layer divergence.)
+    # Faces touching a PARKED cell carry zero raw transport (Neumann wall) via `_transp` — this masks
+    # Draw consistently with the walled Poisson stencil, so div(U*)=T and C≡1 still hold on active cells.
     Ux, Uy = proj.Ux, proj.Uy
     fill!(Ux, 0.0); fill!(Uy, 0.0)
     @inbounds for j in 1:ny, i in 1:nx
-        if _wet(proj, i-1, j) && _wet(proj, i, j)
+        if _transp(proj, i-1, j) && _transp(proj, i, j)
             ig, jg = i + ng, j + ng
             dyf = 0.5 * (dyo[i-1, j] + dyo[i, j]); Df = min(_Dc(proj, i-1, j), _Dc(proj, i, j))
             for k in 1:nz; Ux[i, j, k] = u[ig, jg, k] * dyf * dsig[k] * Df; end
         end
-        if _wet(proj, i, j-1) && _wet(proj, i, j)
+        if _transp(proj, i, j-1) && _transp(proj, i, j)
             ig, jg = i + ng, j + ng
             dxf = 0.5 * (dxo[i, j-1] + dxo[i, j]); Df = min(_Dc(proj, i, j-1), _Dc(proj, i, j))
             for k in 1:nz; Uy[i, j, k] = v[ig, jg, k] * dxf * dsig[k] * Df; end
@@ -258,7 +304,7 @@ function project!(proj::BreathingProjector, grid::CurvilinearGrid,
     phi = proj.phi; fill!(phi, 0.0)
     if N > 0
         A = sparse(II, JJ, VV, N, N)
-        phiv = A \ b
+        phiv = A \ b[1:N]    # b is sized to N_max (all-wet); the active count N ≤ N_max varies per read
         @inbounds for j in 1:ny, i in 1:nx
             _active(proj, i, j) && (phi[i, j] = phiv[proj.id[i, j]])
         end

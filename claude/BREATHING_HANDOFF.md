@@ -148,7 +148,43 @@ subdomain, committed + a small benchmark added to `test/benchmarks/reciprocity_b
 
 ---
 
-## 3. IMPROVEMENT 2 — wet/dry parking
+## 3. IMPROVEMENT 2 — wet/dry parking — ✅ DONE (2026-07-04)
+
+**Status: implemented, math-vetted (3 agents unanimous), validated, CI-locked, committed.** Opt-in
+`breathing_parking` (+ `breathing_dpark=0.5`) kwargs on `run_simulation` → `build_projector(...;
+parking, D_park)`. Default off = static topology, **bit-identical** (137/137; suite now **145/145** with
+a new synthetic parking testset). Design (all agent-recommended corrections applied):
+- Per read in `project!`: `parked = wet ∧ min(Hn,Hnp) < D_park`; a single global mouth flood-fill on
+  `wet∧¬parked` (`_flood_and_number!`, dynamic `reach/active/id/N`); mouth-disconnected transportable
+  cells are **folded into `parked`** (a breathing Neumann island is unsolvable — Fredholm ΣT≠0). One
+  pass is a fixed point (no iteration). `min(Hn,Hnp)` is **swap-invariant** ⇒ forward/reverse masks are
+  bit-identical automatically (verified 0 differing cells).
+- **One source of truth for the mask**: raw face transports are zeroed at any face touching a parked
+  cell (`_transp`), so `Draw` is masked consistently with the walled Poisson stencil (the load-bearing
+  bug the agents flagged); the correction + ω already gate on the dynamic `active`; the cascade freezes
+  parked cells (`V0=0`, `hold-C`); `breathing_courant` skips them (via dynamic `active`).
+- **Mass**: `hold-C` (not `hold-mass` — agent A: `C=M/V` puts a spurious dilution on the intertidal
+  receptor). Bounded, sign-cancelling leak `≤ C·A·(surface excursion while parked)`, ≈0 per tidal cycle.
+  Exact conservation, if ever needed, = a resolved wetting/drying transfer flux (debit the active
+  neighbour at donor C) — deferred follow-up.
+
+**Real-grid validation (2010 slab, `production_parking_validation.jl`):** C≡1 **bit-exact 0.0** with
+parking on; forward==reverse parked mask (0 differ); parking **PRESERVES** div(U*)=T on active cells
+(5.6e-11) AND **removes an intermittent continuity BLOW-UP** the rigid floor suffers at near-singular
+drying cells (parking OFF hit **5.0e16** at a drying window → ON 5.6e-11). Perf: at the driest window
+(814 cells drying) sub-steps/read drop **Mc 133 → 51 (2.62× fewer)**. ⚠ The benefit is PHASE-dependent
+and modest because the **deep channel co-dominates the Courant** (agent A predicted this) — at mid-tide
+windows with no drying, parking is a no-op. Net value: continuity robustness + reciprocity-substep-match
+at the intertidal receptor + correct isolated-pool handling; the perf win is real but only 1.25–2.6×.
+
+**Note (adjoint):** parking does NOT repair the reverse-time transpose (already exact even at Va→0 — the
+linear donor-cell adjoint telescopes); it removes the drying-cell Courant collapse that forced mismatched
+forward/reverse sub-step counts. The remaining ~1.5e-4 end-to-end reciprocity floor is the O(dt) vertical
+backward-Euler step (§2), orthogonal to parking → Improvement 3 (vertical FFSL overlap-remap).
+
+---
+
+### Original design notes (superseded by the DONE status above, kept for context)
 
 **Why:** (a) **perf** — the driest intertidal cells drive `breathing_courant` (small V → large
 Courant → ~50–80 sub-steps/read); parking them removes that. (b) **reciprocity at the intertidal

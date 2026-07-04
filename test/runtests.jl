@@ -21,6 +21,8 @@ using HydrodynamicTransport.HydrodynamicsModule: update_hydrodynamics!, update_h
 using HydrodynamicTransport.SettlingModule: apply_settling!
 using HydrodynamicTransport.BedExchangeModule: bed_exchange!
 using HydrodynamicTransport.VectorOperationsModule: rotate_velocities_to_grid!, rotate_velocities_to_geographic
+using HydrodynamicTransport.ProjectionModule: build_projector, project!, continuity_residual
+using HydrodynamicTransport.BreathingTransportModule: build_breathing_work, breathing_transport!, breathing_courant, pad_transports!
 
 # Analytical solver-validation benchmarks (Groups A/B/C). The full studies live in the repo-root
 # validate_advection.jl / validate_vertical.jl / validate_diffusion.jl; here we run small, fast
@@ -578,6 +580,55 @@ end
         @test ak1.courant < 1.0 && ak1.rel < 1e-12                 # measured ~1e-16
         ak2 = bench_breathing_adjoint_kernel(amp=3.0, seed=2)      # multi-cell (Courant>1)
         @test ak2.courant > 1.0 && ak2.rel < 1e-12                 # exact regardless of Courant
+    end
+
+    @testset "Wet/dry parking (breathing-sigma, opt-in)" begin
+        # synthetic deep basin (h=20) with a drying shelf over the last 6 columns (ramps 20->0.3) and an
+        # open deep perimeter; a falling tide dries the shelf. No external data. Validates the agent-vetted
+        # parking claims: correct parked mask, swap-invariant (forward==reverse) mask, well-posedness
+        # (no NaN), and C≡1 bit-exact through a breathing+parking step. (Continuity div(U*)=T is validated
+        # on the real grid — this u=v=0 synthetic geometry is deliberately ill-conditioned for the Poisson.)
+        function drying_grid(; nx=24, ny=10, nz=3, ng=2, dx=100.0)
+            nxt, nyt = nx + 2ng, ny + 2ng
+            pm = fill(1 / dx, nxt, nyt); pn = fill(1 / dx, nxt, nyt)
+            Lz = 20.0; h = fill(Lz, nxt, nyt)
+            for j in 1:nyt, i in 1:nxt
+                ip = clamp(i - ng, 1, nx)
+                ip >= nx - 5 && (h[i, j] = 20.0 - (20.0 - 0.3) * (ip - (nx - 6)) / 6)
+            end
+            z = zeros(Float64, nxt, nyt); z_w = collect(range(-Lz, 0.0, length = nz + 1))
+            vol = zeros(nxt, nyt, nz); fax = zeros(nxt + 1, nyt, nz); fay = zeros(nxt, nyt + 1, nz)
+            for k in 1:nz
+                dz = abs(z_w[k+1] - z_w[k]); vol[:, :, k] .= dx * dx * dz
+                fax[:, :, k] .= dx * dz; fay[:, :, k] .= dx * dz
+            end
+            CurvilinearGrid(ng, nx, ny, nz, z, z, z, z, z, z, z_w, pm, pn, z, h,
+                trues(nxt, nyt), trues(nx + 1 + 2ng, nyt), trues(nxt, ny + 1 + 2ng), fax, fay, vol)
+        end
+        grid = drying_grid(); ng, nx, ny, nz = grid.ng, grid.nx, grid.ny, grid.nz
+        eta_n = fill(0.15, nx, ny); eta_np1 = fill(-0.15, nx, ny)
+        u = zeros(nx + 2ng, ny + 2ng, nz); v = zeros(nx + 2ng, ny + 2ng, nz); dt = 1800.0
+        Dp, wm, ho = 0.5, 0.2, 10.0
+        poff = build_projector(grid; parking = false, wet_min = wm, h_open = ho)
+        project!(poff, grid, u, v, eta_n, eta_np1, dt)
+        pon = build_projector(grid; parking = true, D_park = Dp, wet_min = wm, h_open = ho)
+        project!(pon, grid, u, v, eta_n, eta_np1, dt)
+        shallow = [pon.wet[i, j] && min(pon.Hn[i, j], pon.Hnp[i, j]) < Dp for i in 1:nx, j in 1:ny]
+        @test count(shallow) > 0                                        # the shelf actually dries
+        @test all(shallow[i, j] ? pon.parked[i, j] : true for i in 1:nx, j in 1:ny)  # parked ⊇ shallow
+        @test 0 < pon.N <= poff.N                                       # parking only removes unknowns
+        @test all(isfinite, pon.phi) && all(isfinite, pon.Ux) && all(isfinite, pon.omega)  # well-posed
+        # reverse-time mask swap-invariance: min(Hn,Hnp) + connectivity ⇒ forward parked == reverse parked
+        pr = build_projector(grid; parking = true, D_park = Dp, wet_min = wm, h_open = ho)
+        project!(pr, grid, -u, -v, eta_np1, eta_n, dt)
+        @test pon.parked == pr.parked
+        # C≡1 stays bit-exact through a breathing+parking sub-step (parked cells hold C, active breathe)
+        bw = build_breathing_work(grid); pad_transports!(bw, pon)
+        cour = breathing_courant(pon, bw); dts = min(dt, cour > 0 ? 0.4 / cour : dt)
+        st = initialize_state(grid, (:C,)); fill!(st.tracers[:C], 1.0)
+        breathing_transport!(st, pon, bw, grid, dts, 0.0; camb = 1.0, Kz = 1e-3)
+        ci = st.tracers[:C][ng+1:ng+nx, ng+1:ng+ny, :]
+        @test maximum(abs.(ci .- 1.0)) < 1e-12
     end
 
 end

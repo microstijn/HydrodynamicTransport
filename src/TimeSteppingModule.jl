@@ -76,6 +76,12 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         # default monotone PPM+FCT: use for the reverse-time reciprocity/adjoint product
                         # (machine-precision transpose). No effect unless `breathing=true`.
                         breathing_linear::Bool=false,
+                        # OPT-IN wet/dry parking: freeze cells whose min(Hn,Hnp) < breathing_dpark (and any
+                        # cell parking disconnects from the mouth) as no-flux walls each read — removes the
+                        # intertidal Courant collapse (fewer sub-steps) and keeps the reverse-time mask
+                        # swap-invariant. Default off = static topology (bit-identical). No effect unless breathing.
+                        breathing_parking::Bool=false,
+                        breathing_dpark::Float64=0.5,
                         diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
                         # --- BACKWARD / ADJOINT mode (opt-in; forward path byte-identical when false) ---
                         # For a LINEAR passive tracer the adjoint transport is the same advection-diffusion
@@ -122,7 +128,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         (grid isa CurvilinearGrid) || error("breathing mode requires a CurvilinearGrid")
         (ds !== nothing && hydro_data !== nothing) ||
             error("breathing mode requires ds + hydro_data (real hydro with a free surface)")
-        breathing_proj = build_projector(grid)
+        breathing_proj = build_projector(grid; parking=breathing_parking, D_park=breathing_dpark)
         breathing_work = build_breathing_work(grid)
     end
 

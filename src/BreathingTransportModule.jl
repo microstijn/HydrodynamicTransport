@@ -87,7 +87,11 @@ function _update_cascade_volumes!(bw::BreathingWork, proj::BreathingProjector, d
     hdt = 0.5 * dt
     fill!(V0, 0.0)
     @inbounds for j in 1:ny, i in 1:nx
-        proj.wet[i, j] || continue
+        # PARKED cells (wet/dry parking) stay V0=0 ⇒ the FFSL walk treats them as walls (vdep≤0) and
+        # holds their C: with their faces' transports zeroed the whole cascade keeps V=0, so C is frozen
+        # (mass held; a bounded, per-tidal-cycle-cancelling leak — agent-vetted `hold-C`). Non-parking:
+        # proj.parked is all-false ⇒ unchanged (bit-identical).
+        (proj.wet[i, j] && !proj.parked[i, j]) || continue
         H = proj.Hn[i, j] + f0 * (proj.Hnp[i, j] - proj.Hn[i, j])
         a = proj.dxo[i, j] * proj.dyo[i, j]
         ig, jg = i + ng, j + ng

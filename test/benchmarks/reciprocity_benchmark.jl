@@ -24,6 +24,8 @@
 
 using HydrodynamicTransport
 using HydrodynamicTransport.ModelStructs
+using HydrodynamicTransport.ProjectionModule: build_projector
+using HydrodynamicTransport.BreathingTransportModule: _zsweep_vffsl!
 using NCDatasets
 using Random
 using LinearAlgebra
@@ -213,4 +215,74 @@ function bench_breathing_adjoint_kernel(; nphys::Int=48, ng::Int=2, seed::Int=12
     resid = maximum(abs.(LHS .- RHS))
     scale = maximum(abs.(LHS))
     return (resid=resid, rel=(scale > 0 ? resid / scale : resid), courant=peak_courant, nphys=nphys)
+end
+
+# fresh per-call scratch tuple for `_zsweep_vffsl!` (matches the layout built in breathing_transport!)
+_vffsl_scratch(mmax, nz) = (crow=zeros(mmax), Srow=zeros(mmax), varr=zeros(mmax), cL=zeros(mmax), cR=zeros(mmax),
+    Flo=zeros(mmax), Fhi=zeros(mmax), Ctd=zeros(mmax), Rp=zeros(mmax), Rm=zeros(mmax), dl=zeros(nz), dd=zeros(nz),
+    du=zeros(nz), rhs=zeros(nz), cprime=zeros(nz), om=zeros(nz+1), Vdc=zeros(nz), Va=zeros(nz), dz=zeros(nz),
+    vcol=zeros(max(mmax, nz+2)))
+
+# Build the vertical z-step column operator (nz×nz) at cell (ic,jc): set ω = omsign·om on every active
+# column, seed a unit basis in each layer, apply `_zsweep_vffsl!`, read the (ic,jc) column. TOP-LEVEL (a
+# nested closure silently corrupts the 2nd call — the Julia boxing gotcha this file already hit once).
+function _vffsl_zop(proj, grid, om, Vd3vol, omsign, dt, Kz, ic, jc, linear)
+    ng, nx, ny, nz = grid.ng, grid.nx, grid.ny, grid.nz
+    for j in 1:ny, i in 1:nx
+        proj.active[i, j] || continue
+        for k in 1:nz+1; proj.omega[i, j, k] = omsign * om[k]; end
+    end
+    Vd3 = zeros(nx+2ng, ny+2ng, nz)
+    for j in 1:ny, i in 1:nx
+        proj.active[i, j] || continue
+        for k in 1:nz; Vd3[i+ng, j+ng, k] = Vd3vol[k]; end
+    end
+    M = zeros(nz, nz); s = _vffsl_scratch(nz+2, nz)
+    for kk in 1:nz
+        C = zeros(nx+2ng, ny+2ng, nz); C[ic+ng, jc+ng, kk] = 1.0
+        _zsweep_vffsl!(C, proj, Vd3, dt, Kz, s, ng, nx, ny, nz, linear)
+        for k in 1:nz; M[k, kk] = C[ic+ng, jc+ng, k]; end
+    end
+    return M
+end
+
+# bench_vertical_ffsl_adjoint(; nz, seed) -> (adj, c1_lin, c1_ppm)
+#
+# Validate the opt-in vertical FFSL z-step (`breathing_vffsl`) with NO external data: on a deep uniform
+# column (interior active, ω=0 at seabed/surface), (1) the LINEAR z-step operator is EXACTLY self-adjoint
+# under reverse time — `diag(Va)·M = (diag(Vd)·M_rev)ᵀ` with M_rev = negate ω, depart from Va (math-vetted,
+# 3 agents), and (2) C≡1 is preserved bit-exact in BOTH the linear (donor-cell) and PPM+FCT flux modes.
+function bench_vertical_ffsl_adjoint(; nz::Int=6, seed::Int=5)
+    nx = ny = 5; ng = 2; dx = 100.0; Lz = 30.0
+    nxt, nyt = nx + 2ng, ny + 2ng
+    pm = fill(1/dx, nxt, nyt); pn = fill(1/dx, nxt, nyt); h = fill(Lz, nxt, nyt); z = zeros(nxt, nyt)
+    z_w = collect(range(-Lz, 0.0, length=nz+1)); vol = zeros(nxt, nyt, nz); fax = zeros(nxt+1, nyt, nz); fay = zeros(nxt, nyt+1, nz)
+    for k in 1:nz; dz = abs(z_w[k+1]-z_w[k]); vol[:, :, k] .= dx*dx*dz; fax[:, :, k] .= dx*dz; fay[:, :, k] .= dx*dz; end
+    grid = CurvilinearGrid(ng, nx, ny, nz, z, z, z, z, z, z, z_w, pm, pn, z, h,
+        trues(nxt, nyt), trues(nx+1+2ng, nyt), trues(nxt, ny+1+2ng), fax, fay, vol)
+    proj = build_projector(grid; h_open=20.0)      # deep edges = Dirichlet mouth ⇒ interior active
+    ic, jc = 3, 3
+    a = proj.dxo[ic, jc] * proj.dyo[ic, jc]; dt = 100.0; Kz = 1e-3
+    rng = MersenneTwister(seed)
+    om = zeros(nz+1); for k in 2:nz; om[k] = (2rand(rng)-1)*3.0e2; end
+    Vd = [a*(0.8+0.6rand(rng))*(30.0/nz) for _ in 1:nz]
+    Va = [Vd[k] - dt*(om[k+1]-om[k]) for k in 1:nz]
+    M  = _vffsl_zop(proj, grid, om, Vd, +1.0, dt, Kz, ic, jc, true)
+    Mr = _vffsl_zop(proj, grid, om, Va, -1.0, dt, Kz, ic, jc, true)
+    adj = maximum(abs.(Diagonal(Va) * M .- permutedims(Diagonal(Vd) * Mr)))
+    c1 = Float64[]
+    for lin in (true, false)
+        for j in 1:ny, i in 1:nx
+            proj.active[i, j] || continue
+            for k in 1:nz+1; proj.omega[i, j, k] = om[k]; end
+        end
+        Vd3 = zeros(nx+2ng, ny+2ng, nz)
+        for j in 1:ny, i in 1:nx; proj.active[i, j] || continue; for k in 1:nz; Vd3[i+ng, j+ng, k] = Vd[k]; end; end
+        C = ones(nx+2ng, ny+2ng, nz)
+        _zsweep_vffsl!(C, proj, Vd3, dt, Kz, _vffsl_scratch(nz+2, nz), ng, nx, ny, nz, lin)
+        m1 = 0.0
+        for j in 1:ny, i in 1:nx; proj.active[i, j] || continue; for k in 1:nz; m1 = max(m1, abs(C[i+ng, j+ng, k]-1.0)); end; end
+        push!(c1, m1)
+    end
+    return (adj=adj, va_positive=all(>(0.0), Va), c1_lin=c1[1], c1_ppm=c1[2])
 end

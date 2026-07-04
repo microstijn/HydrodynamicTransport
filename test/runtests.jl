@@ -631,4 +631,18 @@ end
         @test maximum(abs.(ci .- 1.0)) < 1e-12
     end
 
+    @testset "Vertical FFSL z-step (breathing-sigma, opt-in)" begin
+        # The opt-in vertical FFSL (`breathing_vffsl`) replaces the implicit vertical with a vertical FFSL
+        # overlap-remap advection + symmetric ½-diffusion. Math-vetted (3 agents): the LINEAR z-step column
+        # operator is EXACTLY self-adjoint under reverse time (negate ω, depart from Va), and C≡1 is exact
+        # in both the linear and PPM flux modes. Verified directly on `_zsweep_vffsl!` (no external data).
+        # NB: this makes the VERTICAL exactly adjoint; the full-3D real-grid reverse-time reciprocity floor
+        # (~1e-4) is a separate horizontal/splitting residual, not the vertical.
+        vf = bench_vertical_ffsl_adjoint()
+        @test vf.va_positive
+        @test vf.adj < 1e-9        # exact reverse-time adjoint of the z-step (measured ~7e-12)
+        @test vf.c1_lin < 1e-12    # C≡1 exact, donor-cell (linear) flux
+        @test vf.c1_ppm < 1e-12    # C≡1 exact, PPM+FCT flux
+    end
+
 end

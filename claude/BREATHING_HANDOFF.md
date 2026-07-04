@@ -230,6 +230,40 @@ mode from Improvement 1) → machine precision. Drivers to adapt: the C≡1 `ver
 
 ---
 
+## 3b. IMPROVEMENT 3 — vertical FFSL: CORRECT vertical, but NOT the reciprocity floor (2026-07-04)
+
+Opt-in `breathing_vffsl` replaces the implicit backward-Euler vertical with a vertical FFSL overlap-remap
+advection (reuses `_ffsl_line_breathing!` on the CLOSED column: cells=layers, `Srow[f]=ω[f]·dt`, ω=0 at
+seabed/surface, zero-gradient reflected ghost) + a SYMMETRIC `½diff(Vd)·adv·½diff(Va)` diffusion (½diff on
+the DEPARTURE volume Vd before advection, on the ARRIVAL volume Va after — the side-pairing is load-bearing).
+Math-vetted (3 agents unanimous, all 5 claims machine-precision). Validated directly on `_zsweep_vffsl!`:
+z-step column adjoint `diag(Va)M = (diag(Vd)M_rev)ᵀ` → **7.3e-12**; C≡1 bit-exact (2.2e-16) in BOTH the
+linear (donor-cell) and PPM+FCT flux modes. Default off = implicit vertical, bit-identical (suite 145→149;
+CI `bench_vertical_ffsl_adjoint`).
+
+⚠️ **KEY NEGATIVE FINDING — the vertical FFSL does NOT move the full-3D real-grid reverse-time reciprocity
+(1.155e-4 WITH vffsl == 1.155e-4 without).** The reciprocity floor is NOT the vertical. Systematically ruled
+out: vertical scheme (vffsl no change), Float32 tracer storage (`const FT`→Float64 gives identical 1.155e-4),
+diffusion (Kz=0 same), adaptive-partition mismatch (fixed dt=1800/64 same 1.155e-4), projection antisymmetry
+(reverse −U*/−ω and Hn↔Hnp are EXACTLY 0.0). Structural reason: the reciprocity support is DEEP (always-wet)
+where ω≈0, so the vertical is ~identity there regardless of scheme. The residual is O(dt) (dt-halving
+1.16e-4→5.83e-5→2.92e-5) and grows SUBLINEARLY with the window (4.2e-5 at 1 read → 1.155e-4 at 4 reads) ⇒ a
+per-sub-step O(dt²) reverse-time residual with partial cancellation. Likely = the Strang x·y·z split
+commutator's non-self-adjointness and/or the FFSL OPEN-boundary/land `camb` (each sweep is a proven exact
+adjoint on a CLOSED line, but the real run's rows are OPEN at the domain edges / land walls). NOT fixable by
+improving any single sweep.
+
+⇒ **This CORRECTS §2 / the Improvement-1 memory attribution** ("floor = O(dt) vertical backward-Euler"): the
+vertical is near-identity at the deep support and its scheme is irrelevant to the floor. The kernel/column
+adjoints ARE machine-precision (horizontal 2e-16, vertical 7e-12); the COMPOSED full-3D real-run reverse-time
+reciprocity floors at ~1e-4. Machine-precision FULL-3D reciprocity would need a TAPED adjoint (store the
+forward trajectory, apply the exact transpose backward — vs the current solver-mode negate-velocity re-run)
+OR an all-closed-boundary config. vffsl is committed as the correct, opt-in exactly-adjoint vertical
+(unconditionally stable, higher-order) for when that is pursued; the ~1e-4 solver-mode floor is documented as
+the realistic reverse-time reciprocity for the Gate-1 product.
+
+---
+
 ## 4. PHASE 5 — kernel-library re-baseline (AFTER 1+2)
 
 Deliberate, separate campaign: regenerate the 137-source K7 kernel library + the reverse-time

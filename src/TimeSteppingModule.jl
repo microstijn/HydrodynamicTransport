@@ -82,6 +82,12 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         # swap-invariant. Default off = static topology (bit-identical). No effect unless breathing.
                         breathing_parking::Bool=false,
                         breathing_dpark::Float64=0.5,
+                        # OPT-IN vertical FFSL: replace the implicit backward-Euler vertical (an O(dt) adjoint)
+                        # with a vertical FFSL overlap-remap + symmetric Crank-Nicolson-style half-diffusions —
+                        # exactly self-adjoint, so with breathing_linear the FULL 3-D step is an exact discrete
+                        # adjoint (machine-precision reverse-time reciprocity). Default off = implicit vertical
+                        # (bit-identical). No effect unless breathing=true.
+                        breathing_vffsl::Bool=false,
                         diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
                         # --- BACKWARD / ADJOINT mode (opt-in; forward path byte-identical when false) ---
                         # For a LINEAR passive tracer the adjoint transport is the same advection-diffusion
@@ -223,7 +229,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             else
                 (htime - breathing_proj.t_read_start) / dT_read
             end
-            breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz, linear=breathing_linear)
+            breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz, linear=breathing_linear, vffsl=breathing_vffsl)
             deposition = apply_settling!(work, grid, trial_dt, sediment_params)
             bed_exchange!(work, grid, trial_dt, deposition, sediment_params)
             source_sink_terms!(work, grid, sources, functional_interactions, time + trial_dt, trial_dt, D_crit)

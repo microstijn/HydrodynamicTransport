@@ -205,6 +205,69 @@ function _zsweep!(C, proj, Vd3, dt, Kz, s, ng, nx, ny, nz)
     end
 end
 
+# Implicit backward-Euler vertical DIFFUSION on a FIXED volume field `V` (layer volumes), timestep `dt2`.
+# Solves (diag(V) + dt2·L)·Cnew = diag(V)·Cold in place (Thomas), L = the symmetric layer-conductance
+# graph-Laplacian (face conductance g = Kz·area/Δz_face, harmonic in the two layer thicknesses; 0 at the
+# seabed/surface). L symmetric + row-sum 0 ⇒ this diffusion is SELF-ADJOINT in the V-weighted inner product
+# and preserves C≡1 exactly (dd+dl+du = V). Kz=0 ⇒ identity. Reuses `dz` scratch.
+@inline function _diffuse_z_col!(C, V, area, dt2, nz, Kz, dz, dl, dd, du, rhs, cprime)
+    @inbounds begin
+        for k in 1:nz; dz[k] = V[k] > 0.0 ? V[k] / area : 0.0; end
+        for k in 1:nz
+            gb = (k > 1  && dz[k] > 0.0 && dz[k-1] > 0.0) ? Kz * area / (0.5*(dz[k]+dz[k-1])) : 0.0
+            gt = (k < nz && dz[k] > 0.0 && dz[k+1] > 0.0) ? Kz * area / (0.5*(dz[k]+dz[k+1])) : 0.0
+            dd[k] = V[k] + dt2*(gb + gt); dl[k] = -dt2*gb; du[k] = -dt2*gt; rhs[k] = V[k]*C[k]
+        end
+        cprime[1] = du[1] / dd[1]; rhs[1] = rhs[1] / dd[1]
+        for k in 2:nz
+            m = dd[k] - dl[k]*cprime[k-1]; cprime[k] = du[k] / m; rhs[k] = (rhs[k] - dl[k]*rhs[k-1]) / m
+        end
+        C[nz] = rhs[nz]
+        for k in nz-1:-1:1; C[k] = rhs[k] - cprime[k]*C[k+1]; end
+    end
+    return nothing
+end
+
+# VERTICAL-FFSL breathing z-sweep (opt-in): the EXACTLY self-adjoint alternative to the implicit
+# `_zsweep!`. Per active column, the symmetric split  ½diff(Vd) → FFSL-adv(Vd→Va) → ½diff(Va)  (math-vetted
+# by 3 agents; the Vd-before / Va-after side-pairing is load-bearing). The advection REUSES the proven
+# exact-adjoint `_ffsl_line_breathing!` kernel on the CLOSED column (cells = layers, departure = Vd, swept
+# volume across the bottom face of layer k = ω[k]·dt, ω=0 at seabed/surface). Its reverse-time form (ω→−ω,
+# Vd↔Va) is its exact transpose, and the two self-adjoint half-diffusions make the whole z-step a time
+# palindrome ⇒ the full Strang cascade is an exact discrete adjoint (machine-precision 3-D reciprocity),
+# for any Kz. Unconditionally stable (multi-cell overlap walk). `linear` selects donor-cell (exact adjoint)
+# vs PPM+FCT for the advective flux, matching the horizontal sweeps.
+function _zsweep_vffsl!(C, proj, Vd3, dt, Kz, s, ng, nx, ny, nz, linear)
+    ngv = 1; mcol = nz + 2*ngv; hdt = 0.5 * dt
+    @inbounds for j in 1:ny, i in 1:nx
+        proj.active[i, j] || continue
+        ig, jg = i + ng, j + ng
+        a = proj.dxo[i, j] * proj.dyo[i, j]
+        for k in 1:nz; s.om[k] = proj.omega[i, j, k]; s.Vdc[k] = Vd3[ig, jg, k]; end
+        s.om[nz+1] = proj.omega[i, j, nz+1]
+        for k in 1:nz; s.Va[k] = s.Vdc[k] - dt * (s.om[k+1] - s.om[k]); end
+        Ccol = view(C, ig, jg, :)
+        # STEP 1 — ½ diffusion on the DEPARTURE volume Vd
+        _diffuse_z_col!(Ccol, s.Vdc, a, hdt, nz, Kz, s.dz, s.dl, s.dd, s.du, s.rhs, s.cprime)
+        # STEP 2 — FFSL advection Vd→Va on the closed column (Srow[f]=ω[f]·dt; ends 0). ghost dep-vols
+        # (g=1, g=mcol) are never fluxed (boundary faces closed) but must be > 0 so the walk sees no wall.
+        s.vcol[1] = s.Vdc[1]; s.vcol[mcol] = s.Vdc[nz]
+        for k in 1:nz; s.vcol[k+ngv] = s.Vdc[k]; s.crow[k+ngv] = Ccol[k]; end
+        # zero-gradient (reflect) ghosts at the closed seabed/surface: the boundary faces carry S=0 so
+        # the linear donor walk never reads them (adjoint unaffected), but the PPM reconstruction of the
+        # edge layers does — a reflected ghost keeps a uniform tracer exactly 1 (crow[1]=0 would break C≡1).
+        s.crow[1] = s.crow[ngv+1]; s.crow[mcol] = s.crow[ngv+nz]
+        for f in 1:nz+1; s.Srow[f] = s.om[f] * dt; end
+        s.Srow[mcol] = 0.0
+        _ffsl_line_breathing!(view(s.crow,1:mcol), view(s.crow,1:mcol), view(s.vcol,1:mcol), view(s.varr,1:mcol),
+            view(s.Srow,1:mcol), view(s.cL,1:mcol), view(s.cR,1:mcol), view(s.Flo,1:mcol), view(s.Fhi,1:mcol),
+            view(s.Ctd,1:mcol), view(s.Rp,1:mcol), view(s.Rm,1:mcol), mcol, ngv, nz; camb=0.0, linear=linear)
+        for k in 1:nz; Ccol[k] = s.crow[k+ngv]; end
+        # STEP 3 — ½ diffusion on the ARRIVAL volume Va
+        _diffuse_z_col!(Ccol, s.Va, a, hdt, nz, Kz, s.dz, s.dl, s.dd, s.du, s.rhs, s.cprime)
+    end
+end
+
 """
     breathing_transport!(state, proj, bw, grid, dt, f0; camb=0.0, Kz=1e-4)
 
@@ -216,7 +279,7 @@ C≡1 check, 0 for the clean-ocean pathogen tracer). Mutates `state.tracers` in 
 """
 function breathing_transport!(state::State, proj::BreathingProjector, bw::BreathingWork,
                               grid::CurvilinearGrid, dt::Float64, f0::Float64;
-                              camb::Float64=0.0, Kz::Float64=1e-4, linear::Bool=false)
+                              camb::Float64=0.0, Kz::Float64=1e-4, linear::Bool=false, vffsl::Bool=false)
     ng, nx, ny, nz = bw.ng, proj.nx, proj.ny, proj.nz
     mx, my = bw.mx, bw.my
     _update_cascade_volumes!(bw, proj, dt, f0)
@@ -235,14 +298,19 @@ function breathing_transport!(state::State, proj::BreathingProjector, bw::Breath
              Rp=Vector{Float64}(undef, mmax), Rm=Vector{Float64}(undef, mmax),
              dl=Vector{Float64}(undef, nz), dd=Vector{Float64}(undef, nz), du=Vector{Float64}(undef, nz),
              rhs=Vector{Float64}(undef, nz), cprime=Vector{Float64}(undef, nz), om=Vector{Float64}(undef, nz+1),
-             Vdc=Vector{Float64}(undef, nz), Va=Vector{Float64}(undef, nz), dz=Vector{Float64}(undef, nz))
+             Vdc=Vector{Float64}(undef, nz), Va=Vector{Float64}(undef, nz), dz=Vector{Float64}(undef, nz),
+             vcol=Vector{Float64}(undef, max(mmax, nz+2)))
         ti = cid
         while ti <= ntr
             C = state.tracers[tracer_names[ti]]
             # Strang split ½x · ½y · z · ½y · ½x, threading the cascade departure volumes V0..V4.
             _xsweep!(C, V0, Uxf, hdt, camb, s, mx, my, ng, nx, nz, linear)
             _ysweep!(C, V1, Uyf, hdt, camb, s, mx, my, ng, ny, nz, linear)
-            _zsweep!(C, proj, V2, dt, Kz, s, ng, nx, ny, nz)
+            if vffsl
+                _zsweep_vffsl!(C, proj, V2, dt, Kz, s, ng, nx, ny, nz, linear)
+            else
+                _zsweep!(C, proj, V2, dt, Kz, s, ng, nx, ny, nz)
+            end
             _ysweep!(C, V3, Uyf, hdt, camb, s, mx, my, ng, ny, nz, linear)
             _xsweep!(C, V4, Uxf, hdt, camb, s, mx, my, ng, nx, nz, linear)
             ti += nchunks

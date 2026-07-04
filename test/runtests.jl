@@ -582,6 +582,39 @@ end
         @test ak2.courant > 1.0 && ak2.rel < 1e-12                 # exact regardless of Courant
     end
 
+    @testset "Reverse-time read-boundary selection (breathing-sigma)" begin
+        # Regression guard for the reverse-time reciprocity floor. A reverse (adjoint) breathing run
+        # descends in real time; when it lands EXACTLY on a hydro read boundary tv[r] it must project the
+        # read it is about to traverse DOWNWARD, [tv[r-1], tv[r]], NOT the read [tv[r], tv[r+1]] that
+        # searchsortedlast returns. The old code used the read above at every boundary, so one sub-step per
+        # read boundary advected with the wrong read's transports — an O(dt) per-boundary non-mirror that was
+        # the ENTIRE full-3D real-grid reverse-time reciprocity floor (~1.5e-4 with 4 reads; fixing it drops
+        # linear+vffsl reciprocity to ~5e-9, Float32-limited). The cascade volumes, the horizontal/vertical
+        # sweep adjoints, and the Strang split were all already exact — read selection was the only defect.
+        mktempdir() do dir
+            path = joinpath(dir, "breathe.nc")
+            tvec = [0.0, 1800.0, 3600.0, 5400.0, 7200.0]     # 4 reads
+            quiet() do
+                write_breathing_nc(path; nx=12, ny=12, nz=3, dx=500.0, depth=40.0, tvec=tvec,
+                                   zeta_fun=(x, y, t) -> 0.3 * sinpi(2t / (6 * 1800.0)) * (2x / (12 * 500.0) - 1))
+            end
+            grid = initialize_curvilinear_grid(path); hydro = create_hydrodynamic_data_from_file(path)
+            st = initialize_state(grid, NCDataset(path), (:C,))
+            reads_at(htime, rev) = quiet() do
+                p = build_projector(grid; h_open=20.0, wet_min=1.0, D_min=0.1)
+                update_hydrodynamics!(st, grid, NCDataset(path), hydro, htime; diagnose_w=false, projector=p, reverse=rev)
+                (p.t_read_start, p.t_read_end)
+            end
+            tb = tvec[3]                                       # an interior read boundary (3600 s)
+            fs, fe = reads_at(tb, false)                       # forward: traverses upward
+            @test fs == tvec[3] && fe == tvec[4]               # read [tv[r], tv[r+1]] (correct for forward)
+            rs, re = reads_at(tb, true)                        # reverse AT the boundary: the fix
+            @test rs == tvec[2] && re == tvec[3]               # read BELOW [tv[r-1], tv[r]]
+            ms, me = reads_at(tb + 900.0, true)                # reverse mid-read: unambiguous
+            @test ms == tvec[3] && me == tvec[4]               # containing read, same as forward
+        end
+    end
+
     @testset "Wet/dry parking (breathing-sigma, opt-in)" begin
         # synthetic deep basin (h=20) with a drying shelf over the last 6 columns (ramps 20->0.3) and an
         # open deep perimeter; a falling tide dries the shelf. No external data. Validates the agent-vetted
@@ -636,8 +669,11 @@ end
         # overlap-remap advection + symmetric ½-diffusion. Math-vetted (3 agents): the LINEAR z-step column
         # operator is EXACTLY self-adjoint under reverse time (negate ω, depart from Va), and C≡1 is exact
         # in both the linear and PPM flux modes. Verified directly on `_zsweep_vffsl!` (no external data).
-        # NB: this makes the VERTICAL exactly adjoint; the full-3D real-grid reverse-time reciprocity floor
-        # (~1e-4) is a separate horizontal/splitting residual, not the vertical.
+        # NB: this makes the VERTICAL exactly adjoint. Together with the exact horizontal linear kernel
+        # adjoint and the machine-precision cascade-volume mirror, linear+vffsl full-3D real-grid reverse-time
+        # reciprocity reaches ~5e-9 (Float32-limited) once the reverse read-boundary selection is correct —
+        # see the "Reverse-time read-boundary selection" testset. (The old ~1e-4 floor was that read-selection
+        # bug, NOT the vertical or a splitting residual.)
         vf = bench_vertical_ffsl_adjoint()
         @test vf.va_positive
         @test vf.adj < 1e-9        # exact reverse-time adjoint of the z-step (measured ~7e-12)

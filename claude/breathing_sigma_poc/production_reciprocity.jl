@@ -9,13 +9,17 @@
 #       by V(t1) (the final ARRIVAL volume) and the reverse output by V(t0) (the initial DEPARTURE volume);
 #       only these two END volumes survive the cascade telescoping. Using a single static H0 weight leaves
 #       a residual = the tidal volume variation over the window.
-# MEASURED (2528-cell deep support, 2 h window): linear + V-weight gives ~1.5e-4, a 26x improvement over
-# the FCT/H0 baseline (0.40%). The HORIZONTAL sweep is exactly self-adjoint (kernel unit test in
-# test/benchmarks/reciprocity_benchmark.jl -> 2e-16); the residual that remains is the VERTICAL implicit
-# backward-Euler advection, which is only a FIRST-ORDER (O(dt)) adjoint: the transpose of the forward
-# vertical matrix carries the ARRIVAL volume on its diagonal but the reverse run carries the DEPARTURE
-# volume (they differ by dt·diag(ω[k+1]−ω[k])). Confirmed here by exact dt-halving of the residual, and by
-# Kz=0 being unchanged (it is the ω term, not diffusion). A vertical FFSL overlap-remap would make it exact.
+# MEASURED (2528-cell deep support): with the reverse read-boundary fix + breathing_vffsl=true (exact
+# vertical) + breathing_linear=true, full-3D reverse-time reciprocity is ~5e-9 (Float32 tracer floor;
+# `FT=Float32` in ModelStructs). linear + implicit vertical (vffsl=false) floors at the vertical's O(dt)
+# adjoint (~1.5e-4 pre-fix / vertical-limited post-fix). FCT (linear=false) is limiter-nonlinear ~1e-3.
+#
+# ⚠ HISTORY: the ~1.5e-4 floor was long MISATTRIBUTED — first to the vertical backward-Euler, then to a
+# cascade η-reset volume mismatch ("7.85e-3"). BOTH were WRONG. The real cause (pinned 2026-07-04) was a
+# REVERSE read-boundary selection off-by-one in update_hydrodynamics!: a descending adjoint pass that lands
+# on a read boundary tv[r] must use read [tv[r-1],tv[r]] (below), not the [tv[r],tv[r+1]] that
+# searchsortedlast returns. Fixed reverse-only (forward bit-identical). See BREATHING_HANDOFF.md §3c and the
+# "Reverse-time read-boundary selection" testset. This driver now enables vffsl to exhibit the ~5e-9 floor.
 import Pkg
 const HT=raw"c:\Users\peete074\OneDrive - Wageningen University & Research\programming\HydrodynamicTransport"
 Pkg.activate(HT)
@@ -62,7 +66,7 @@ run1(seedfield; rev=false, org=0.0, ts=t0, te=t1, lin=true) = begin
     ds=NCDataset(path); s=initialize_state(grid, ds,(:C,))
     for j in 1:ny,i in 1:nx,k in 1:nz; s.tracers[:C][i+ng,j+ng,k]=seedfield[i,j,k]; end
     f=run_simulation(grid, s, PointSource[], ts, te, 1800.0; ds=ds, hydro_data=hydro, breathing=true,
-        breathing_camb=0.0, breathing_linear=lin, reverse_time=rev, reverse_time_origin=org,
+        breathing_camb=0.0, breathing_linear=lin, breathing_vffsl=lin, reverse_time=rev, reverse_time_origin=org,
         use_adaptive_dt=true, cfl_max=0.4, dt_max=1800.0, dt_min=0.01, Kz=1e-3, write_full_state=false)
     out=copy(f.tracers[:C]); close(ds); out
 end
@@ -85,6 +89,6 @@ for lin in (false, true)
     @printf("\nlinear=%-5s : rel err  H0-weight = %.3e   V(t1)/V(t0)-weight = %.3e\n", lin, e_h, e_v)
     lin && @printf("           <Ma,b>_V(t1) = %.6e   <a,M*b>_V(t0) = %.6e   ratio = %.9f\n", ip, iq, ip/iq)
 end
-println("\n(default linear=false is FCT-limited ~0.4%; linear=true + V-weight -> ~1.5e-4, floor = the")
-println(" vertical implicit backward-Euler advection = O(dt); the horizontal sweep is exact — see the")
-println(" bench_breathing_adjoint_kernel unit test (2e-16). A vertical FFSL overlap-remap would remove it.)")
+println("\n(linear=false is FCT-limited ~1e-3; linear=true here also enables vffsl=true (exact vertical),")
+println(" and with the reverse read-boundary fix the V-weighted reciprocity is ~5e-9 = the Float32 tracer")
+println(" floor. Drop vffsl to see the implicit vertical's O(dt) adjoint. See BREATHING_HANDOFF.md §3c.)")

@@ -3,26 +3,29 @@
 Self-contained continuation notes. Branch **`previr`** (HydrodynamicTransport). Read alongside
 `SESSION_HANDOFF.md` (the older FFSL/opt notes) and the PoC oracle `breathing_sigma_poc/README.md`.
 
-## ⇒ START HERE (updated 2026-07-04)
+## ⇒ START HERE (updated 2026-07-04 — Improvement 4 DONE; full-3D reciprocity SOLVED)
 
-The forward breathing fix + all THREE requested refinements are **DONE + committed** (suite 149/149,
-each opt-in default bit-identical):
+The forward breathing fix + all FOUR refinements are **DONE + committed** (suite **152/152**, each opt-in
+default bit-identical):
 - **Improvement 1** — linear exact-adjoint breathing mode (`breathing_linear`), commit `d4de909`. §2.
 - **Improvement 2** — wet/dry parking (`breathing_parking`), commit `2ea2519`. §3.
 - **Improvement 3** — vertical FFSL (`breathing_vffsl`), commit `3b71a46`. §3b.
+- **Improvement 4** — **reverse read-boundary selection fix** (§3c). Full-3D real-grid reverse-time
+  reciprocity now **~5e-9** (Float32-limited), down from 1.5e-4 — a ~30,000× improvement.
 
-**NEXT TASK = Improvement 4 (volume-threading)** — the ONE remaining thing blocking machine-precision
-(1e-15) full-3D reverse-time reciprocity. The root cause is **PINNED** (commit `f64107a`, see the "ROOT
-CAUSE" block in §3b): the cascade RESETS its sub-step departure volume from η (uniform-Δσ) every
-sub-step, but the forward ARRIVAL volume carries the `divx/divy/ω` redistribution, and the reverse
-recomputes from η so it can't mirror it (measured mismatch **7.85e-3 = dt/(2·dTread)**; transports & ω
-mirror exactly). The taped adjoint was 3-agent-vetted (machine-precision by construction; camb boundary &
-Strang split are RED HERRINGS). **Fix = consistent volume-threading** (opt-in `breathing_thread_volumes`:
-thread `V0_substep = previous arrival`, reset only at read boundaries, both directions ⇒ exact mirror; no
-memory cost). ⚠ it changes the FORWARD ⇒ NOT bit-identical ⇒ re-validate C≡1 (still algebraic-exact),
-salinity-49×, and the calibrated burden. Alt = windowed volume tape (~12 GB/2h, forward untouched).
+**⚠ THE PRIOR ROOT-CAUSE DIAGNOSES WERE ALL WRONG — corrected this session (empirically).** The real
+floor was NOT the vertical backward-Euler (§2 guess), NOT a horizontal/splitting residual (§3b guess),
+and NOT a cascade η-reset volume mismatch (the `f64107a` "7.85e-3" pin). Those are struck through below;
+read §3c for what actually happened. In one line: **the reverse (adjoint) run selected the WRONG hydro
+read at every read boundary** (`searchsortedlast` returns the read *above* a boundary, but a descending
+pass needs the read *below*), so one sub-step per read boundary advected with the adjacent read's
+transports. This is a **reverse-only** fix — the forward path is **bit-identical** (no C≡1/salinity/burden
+re-validation needed). Everything else (cascade-volume mirror 6.6e-16, horizontal linear kernel adjoint
+1e-16, vertical FFSL z-op adjoint 7e-12) was already exact; read selection was the sole defect.
 
-Then **Phase 5** (§4): kernel-library re-baseline on the 160 GB grid (cluster), driven from softMode C2.
+**NEXT TASK = Phase 5** (§4): kernel-library re-baseline on the 160 GB grid (cluster), driven from
+softMode C2. Reverse-time reciprocity is now machine-precision, so the breathing reverse-time kernels are
+ready for the Gate-1 sensitivity product.
 
 ---
 
@@ -44,8 +47,9 @@ Commits (all on `previr`): `375c143` (P0/1 projection+wiring) · `66a59b4` (P2 k
   → 1.5e-9; positivity (FCT) min=0.
 - **Salinity vs the model's own `SAL`** (2012 file, PoC stage3 method): corrected RMS plateaus at
   0.2–0.84 PSU while rigid-lid diverges to 41 PSU — **17–49× better** (reproduces the PoC 10–40×).
-- **Reverse-time reciprocity** (adjoint duality ⟨Ma,b⟩ vs ⟨a,M*b⟩ on a deep interior support) →
-  **0.40% rel err** (within the FCT-limiter floor).
+- **Reverse-time reciprocity** (adjoint duality ⟨Ma,b⟩ vs ⟨a,M*b⟩ on a deep interior support):
+  **~5e-9** in linear+vffsl mode with the read-boundary fix (§3c) — Float32-tracer-limited, i.e. an
+  EXACT discrete adjoint. (Historically 0.40% FCT-limited → 1.5e-4 linear → 5e-9 after §3c.)
 
 **Math was vetted by independent agents before writing production code** (do this again for the
 refinements — it caught two real bugs). Forward: 3 agents unanimous. Reverse: 3 agents unanimous,
@@ -114,19 +118,21 @@ being every cell volume stays positive (`vdep>0, varr>0`) — cleaner/stronger t
 framing below. Kernel unit test `bench_breathing_adjoint_kernel` (no external data) → **2.2e-16** at
 single- AND multi-cell Courant.
 
-**Real-grid end-to-end (`production_reciprocity.jl`, updated):** linear mode + the adjoint-consistent
-inner product (weight the forward output by V(t1), the reverse by V(t0) — only the two END volumes
-survive the cascade) gives **rel err ~1.5e-4, a 26× improvement over the 0.40% baseline**. The residual
-is NOT the horizontal scheme (exactly self-adjoint) — it is the **VERTICAL implicit backward-Euler
-advection**, which is only a first-order (O(dt)) adjoint: `Aᵀ` carries the ARRIVAL volume on its
-diagonal but the reverse run carries the DEPARTURE volume (differ by `dt·diag(ω[k+1]−ω[k])`). CONFIRMED
-by exact dt-halving of the residual (1.16e-4 → 5.83e-5 → 2.92e-5) and by Kz=0 leaving it unchanged (it
-is the ω term, not diffusion). **This corrects the note below/[[backward-adjoint-reciprocity]]: the
-vertical SPATIAL matrix `A(−ω)=A(ω)ᵀ` is symmetric, but the full time-STEP operator is not adjoint-exact
-when the column breathes.** → new **Improvement 3** (§4b): a vertical FFSL overlap-remap for ω-advection
-(exactly adjoint at any Courant, like the horizontal) + CN diffusion would take the 3D end-to-end to
-machine precision. Only needed if the Gate-1 product wants full-3D machine-precision reciprocity;
-1.5e-4 is already excellent, and the horizontal (dominant) transport is exact.
+**Real-grid end-to-end (`production_reciprocity.jl`):** linear mode + the adjoint-consistent inner
+product (weight the forward output by V(t1), the reverse by V(t0) — only the two END volumes survive the
+cascade) gives **rel err ~1.5e-4**. ⚠ **The attribution in the struck-through paragraph below is WRONG**
+(kept for traceability): the residual is NOT the vertical implicit backward-Euler. The dt-halving and
+Kz-independence it cites are REAL observations but are equally explained by the actual cause — the reverse
+read-boundary selection bug (§3c): one mis-projected sub-step per read boundary, each ~dt long ⇒ error ∝
+dt and independent of Kz/the vertical scheme. The genuine improvement from linear mode is real (drops the
+FCT nonlinearity); the leftover ~1.5e-4 is §3c, fixed reverse-only. With linear+vffsl+the read fix the
+full-3D reciprocity is ~5e-9.
+
+> ~~The residual is NOT the horizontal scheme (exactly self-adjoint) — it is the **VERTICAL implicit
+> backward-Euler advection**, which is only a first-order (O(dt)) adjoint... CONFIRMED by exact dt-halving
+> (1.16e-4 → 5.83e-5 → 2.92e-5) and by Kz=0 leaving it unchanged. → Improvement 3 vertical FFSL would take
+> the 3D end-to-end to machine precision.~~ ❌ WRONG — vffsl does NOT move the real-grid floor (§3b/§3c);
+> the floor was read selection, not the vertical.
 
 ---
 
@@ -272,11 +278,28 @@ adjoint on a CLOSED line, but the real run's rows are OPEN at the domain edges /
 improving any single sweep.
 
 ⇒ **This CORRECTS §2 / the Improvement-1 memory attribution** ("floor = O(dt) vertical backward-Euler"): the
-vertical is near-identity at the deep support and its scheme is irrelevant to the floor. The kernel/column
-adjoints ARE machine-precision (horizontal 2e-16, vertical 7e-12); the COMPOSED full-3D real-run reverse-time
-reciprocity floors at ~1e-4. vffsl is committed as the correct, opt-in exactly-adjoint vertical.
+vertical scheme is irrelevant to the floor. The kernel/column adjoints ARE machine-precision (horizontal
+2e-16, vertical 7e-12); vffsl is committed as the correct, opt-in exactly-adjoint vertical.
 
-### ROOT CAUSE of the ~1.5e-4 floor — PINNED (2026-07-04, taped-adjoint investigation)
+**✅ CORRECT observations, ❌ wrong conclusion (resolved in §3c):** the "vffsl/Float32/Kz/partition all ruled
+out, error grows with window, ∝dt" observations above are all RIGHT and were the key clues. But (a) the
+"support is DEEP where ω≈0, vertical ~identity" claim is FALSE — measured ω/horiz ≈ 0.32 at the support, so
+ω is significant and vffsl genuinely being a no-op means the floor is elsewhere; and (b) the "Strang split
+commutator / open-boundary camb" guess is WRONG (both are exact adjoints). The real cause is the reverse
+**read-boundary selection** off-by-one (§3c): exactly one mis-projected sub-step per read boundary ⇒ error ∝
+(#read boundaries) [grows with window] and ∝ dt [each bad step is ~dt long]. Fixed reverse-only ⇒ ~5e-9.
+
+### ~~ROOT CAUSE of the ~1.5e-4 floor — PINNED (2026-07-04, taped-adjoint investigation)~~ ❌ WRONG — see §3c
+
+**⚠ THIS ENTIRE BLOCK IS REFUTED (2026-07-04, later same day).** The "cascade resets from η, forward
+arrival carries the divx/divy/ω redistribution, reverse can't mirror it, 7.85e-3 = dt/(2·dTread)" claim is
+FALSE. A direct forward-vs-reverse cascade-volume probe on the real grid showed V0..V5 mirror to
+**6.6e-16** (machine precision), transports & ω to exactly 0.0, Hn/Hnp swap to 0.0. The forward arrival
+volume V5 = geom(f_b) EXACTLY by the GCL-ω per-layer closure (`divx+divy+divz = T̃` by construction of ω),
+so the cascade already mirrors and volume-threading would fix a non-problem. The 3-agent "taped adjoint"
+vetting validated the *transpose algebra* (which is fine) but the empirical "7.85e-3" diagnostic that
+motivated it had a bug. The REAL cause is a reverse read-boundary selection off-by-one — see §3c. Kept
+verbatim below only so the mistaken reasoning is traceable.
 
 Taped-adjoint approach vetted by **3 fresh math agents (unanimous)** + empirical on-grid diagnosis:
 - **The taped discrete transpose gives machine-precision reciprocity BY CONSTRUCTION** for linear mode (FCT
@@ -304,6 +327,54 @@ threading blocks full-3D machine-precision reverse-time reciprocity.
 
 ---
 
+## 3c. IMPROVEMENT 4 — the REAL reciprocity floor: reverse read-boundary selection — ✅ DONE (2026-07-04)
+
+**The entire ~1.5e-4 full-3D reverse-time reciprocity floor was a reverse-only read-selection bug.** Fixed
+in `src/Hydrodynamics.jl` `update_hydrodynamics!` (the `idx1`/`idx2` selection). Forward path
+**bit-identical** (guarded by `reverse`); suite 149→**152/152** (new testset "Reverse-time read-boundary
+selection (breathing-sigma)" + `write_breathing_nc` fixture in `benchmark_common.jl`).
+
+**The bug.** A reverse (adjoint) run descends in real hydro time (`htime = origin − lag`). The run loop's
+read-boundary clip lands `htime` EXACTLY on each read boundary `tv[r]`. Then
+`searchsortedlast(tv, tv[r]) = r` selects read `[tv[r], tv[r+1]]` — the read *above* the boundary — but a
+descending pass is about to traverse `[tv[r-1], tv[r]]`, the read *below*. So the sub-step just below every
+read boundary advected with the WRONG (adjacent) read's transports. The forward is unaffected: it ascends,
+so `tv[r]` is the correct left edge of the read it enters.
+
+**Why this fingerprint fooled everyone:** ONE mis-projected sub-step per read boundary ⇒ error **grows with
+the window** (measured 5.2e-5 / 1.12e-4 / 1.51e-4 at 1/2/4 reads) and each bad step is ~`dt` long ⇒ error
+**∝ dt** (the "O(dt)" signature misread as the vertical backward-Euler in §2). It is orthogonal to the
+vertical scheme, Kz, the adaptive/fixed partition, and FCT — all of which were correctly observed NOT to
+move the floor, which is exactly what a read-selection bug predicts.
+
+**The fix** (≈10 lines, reverse-only): when `reverse && idx1 > 1 && htime` is within `1e-6·ΔT` of
+`tv[idx1]` (landed on a boundary), decrement `idx1 -= 1; idx2 = idx1+1` so the descending pass uses the
+read below. Forward untouched.
+
+**Measured (real 2010 CurviLoire grid, deep interior support, linear + vffsl):**
+| config | before | after |
+|---|---|---|
+| window = 1 read | 5.2e-5 | **5.1e-9** |
+| window = 2 reads | 1.12e-4 | **1.9e-8** |
+| window = 4 reads | 1.51e-4 | **4.9e-9** |
+
+~5e-9 is the Float32 tracer floor (`FT = Float32` in `ModelStructs.jl`); a Float64 build would show ~1e-11.
+The breathing reverse-time transport is now an **exact discrete adjoint** in linear+vffsl mode: cascade
+volumes mirror (6.6e-16), horizontal linear kernel adjoint (1e-16), vertical FFSL z-op adjoint (7e-12),
+Strang palindrome self-transposes, and read selection is now correct. **This also silently improves the
+correctness of ANY reverse breathing run** (backward footprint/kernel), not just the reciprocity duality.
+
+**Diagnostic scripts** (this session, scratchpad — not committed): `cascade_volume_mirror_probe.jl`
+(volumes mirror 6.6e-16), `reciprocity_matrix.jl` (the decomposition table above + window scaling),
+`read_alignment_probe.jl` (shows the reverse lag-0 step maps to the read OUTSIDE the window),
+`recip_fix_test.jl` (the after-fix collapse). `production_reciprocity.jl` is now updated to pass
+`breathing_vffsl=true` (in linear mode) so it exhibits the ~5e-9 floor directly — as it stood before, it
+used the implicit vertical and never enabled vffsl, which is why §3b wrongly concluded "vffsl doesn't
+help". `linear=true` alone (implicit vertical, no vffsl) after the read-fix floors at the vertical's O(dt)
+adjoint instead.
+
+---
+
 ## 4. PHASE 5 — kernel-library re-baseline (AFTER 1+2)
 
 Deliberate, separate campaign: regenerate the 137-source K7 kernel library + the reverse-time
@@ -327,17 +398,19 @@ current rigid-lid kernels. This is driven from the **softMode** pipeline, not th
 ## 5. Quick-start checklist for the new session
 
 1. `cd HydrodynamicTransport`; `git branch` → `previr`; `julia +release --project=. test/runtests.jl`
-   → 137/137 (sanity).
-2. Re-run `claude/breathing_sigma_poc/production_reciprocity.jl` → 0.40% (confirms the baseline).
-3. **Improvement 1** (unlimited-linear): vet the multi-cell donor transpose with an agent →
-   implement `linear` flag → reciprocity ≤1e-12.
-4. **Improvement 2** (parking): vet the parking projection with agents → implement opt-in `parking`
-   flag (dynamic active set) → C≡1 + Mc-drop + wetting-cycle conservation + intertidal reciprocity.
-5. **Phase 5**: thread `breathing`(+`linear`) into softMode C2 manifest → cluster re-baseline →
-   re-certify (burden should be unchanged; magnitudes corrected).
+   → **152/152** (sanity).
+2. Improvements 1–4 are all DONE + committed (§2, §3, §3b, §3c). Full-3D reverse-time reciprocity is
+   ~5e-9 (linear+vffsl+read-fix). `production_reciprocity.jl` now demonstrates it (pass the 2010 slab path).
+3. **Phase 5** (§4): thread `breathing`(+`breathing_linear`,`breathing_vffsl`) into the softMode C2
+   manifest → cluster re-baseline on the 160 GB grid → re-certify (burden should be unchanged; magnitudes
+   corrected). The breathing reverse-time kernels are now machine-precision-reciprocal → Gate-1-ready.
 
 **Process reminder (this project's rule, `[[use-math-agents-for-math-fixes]]`):** spawn several
 independent math agents to vet NEW math BEFORE writing production code, reconcile, then checkpoint.
-It caught `Hn→min(Hn,Hnp)` and the `Vd`-not-`Va` framing this session, and the mid-read replay fix
-(reciprocity 76%→0.40%). The AUP content-filter trips on "virus/norovirus" in spawned-agent prompts —
-use NoV/tracer/pathogen-marker (`[[agent-prompt-virus-filter]]`).
+⚠ **But math-agent vetting is not a substitute for an empirical check.** This session's cautionary tale:
+the "7.85e-3 cascade η-reset" root cause was 3-agent-vetted yet WRONG — the agents correctly validated the
+*transpose algebra* but the empirical diagnostic that fed them was buggy. A 5-minute forward-vs-reverse
+volume-mirror probe (6.6e-16, not 7.85e-3) refuted it instantly. **Always reproduce the measured symptom
+before designing a fix, especially when a derivation contradicts the pinned cause.** The AUP content-filter
+trips on "virus/norovirus" in spawned-agent prompts — use NoV/tracer/pathogen-marker
+(`[[agent-prompt-virus-filter]]`).

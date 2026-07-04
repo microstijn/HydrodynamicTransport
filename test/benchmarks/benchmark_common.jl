@@ -22,7 +22,7 @@ using Statistics: mean
 using HydrodynamicTransport
 using HydrodynamicTransport.ModelStructs
 
-export xcenter, ycenter, zcenter, write_velocity_nc, build_grid_state, set_tracer!,
+export xcenter, ycenter, zcenter, write_velocity_nc, write_breathing_nc, build_grid_state, set_tracer!,
        gaussian_hill, zalesak_slotted_cylinder, error_norms, ErrorNorms, fit_order,
        write_results_csv, phys_view, quiet
 
@@ -75,6 +75,42 @@ function write_velocity_nc(path; nx::Int, ny::Int, nz::Int, dx::Float64, dy::Flo
     for t in 1:2, k in 1:nz
         uvar[:, :, k, t] = uarr .* uprofile[k]
         vvar[:, :, k, t] = varr .* vprofile[k]
+    end
+    close(ds)
+    return path
+end
+
+"""
+    write_breathing_nc(path; nx, ny, nz, dx, depth, tvec, zeta_fun) -> path
+
+Write a MARS3D-like NetCDF for the OPT-IN breathing-sigma path: an all-water deep basin (so the wet
+perimeter is the deep-mouth Dirichlet boundary), zero staggered velocity, and a TIME-VARYING free
+surface `zeta[i,j,t] = zeta_fun(x, y, tvec[t])` sampled at rho-cell centres over the `length(tvec)`
+read times `tvec` (seconds). The projection generates the transport from ∂η/∂t. Variable names
+(`zeta`, `u`, `v`, `ocean_time`) are autodetected by `create_hydrodynamic_data_from_file`.
+"""
+function write_breathing_nc(path::String; nx::Int, ny::Int, nz::Int, dx::Float64, depth::Float64,
+                            tvec::AbstractVector, zeta_fun)
+    ntime = length(tvec)
+    ds = NCDataset(path, "c")
+    for (d, n) in (("xi_rho", nx), ("eta_rho", ny), ("xi_u", nx), ("eta_u", ny),
+                   ("xi_v", nx), ("eta_v", ny), ("s_rho", nz), ("ocean_time", ntime))
+        defDim(ds, d, n)
+    end
+    defVar(ds, "lon_rho", [xcenter(i, dx) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
+    defVar(ds, "lat_rho", [ycenter(j, dx) for i in 1:nx, j in 1:ny], ("xi_rho", "eta_rho"))
+    defVar(ds, "h", fill(depth, nx, ny), ("xi_rho", "eta_rho"))
+    defVar(ds, "dx", fill(dx, nx, ny), ("xi_rho", "eta_rho"))
+    defVar(ds, "dy", fill(dx, nx, ny), ("xi_rho", "eta_rho"))
+    defVar(ds, "angle", zeros(nx, ny), ("xi_rho", "eta_rho"))
+    defVar(ds, "mask_rho", ones(Int, nx, ny), ("xi_rho", "eta_rho"))
+    defVar(ds, "ocean_time", collect(Float64, tvec), ("ocean_time",))
+    uvar = defVar(ds, "u", Float64, ("xi_u", "eta_u", "s_rho", "ocean_time"))
+    vvar = defVar(ds, "v", Float64, ("xi_v", "eta_v", "s_rho", "ocean_time"))
+    zvar = defVar(ds, "zeta", Float64, ("xi_rho", "eta_rho", "ocean_time"))
+    for t in 1:ntime
+        zvar[:, :, t] = [zeta_fun(xcenter(i, dx), ycenter(j, dx), Float64(tvec[t])) for i in 1:nx, j in 1:ny]
+        for k in 1:nz; uvar[:, :, k, t] .= 0.0; vvar[:, :, k, t] .= 0.0; end
     end
     close(ds)
     return path

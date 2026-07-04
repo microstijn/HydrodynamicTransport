@@ -186,7 +186,20 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
     local idx1, idx2, weight
     if time <= time_dim_seconds[1]; idx1 = 1; idx2 = 1; weight = 0.0
     elseif time >= time_dim_seconds[n_times]; idx1 = n_times; idx2 = n_times; weight = 0.0
-    else; idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1; t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1; weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0; end
+    else
+        idx1 = searchsortedlast(time_dim_seconds, time); idx2 = idx1 + 1
+        # REVERSE-TIME read selection at a boundary: a descending pass that lands EXACTLY on a read
+        # boundary tv[r] must use the read it is about to traverse DOWNWARD, [tv[r-1], tv[r]], not the read
+        # [tv[r], tv[r+1]] that searchsortedlast returns (which starts at tv[r]). Otherwise the sub-step
+        # just below each read boundary advects with the WRONG (adjacent) read's transports — an O(dt)
+        # per-read-boundary reverse-time non-mirror that is the real reverse-time reciprocity floor.
+        # Forward (reverse=false) is untouched: it traverses [tv[r], tv[r+1]] UPWARD, so tv[r] is correct.
+        if reverse && idx1 > 1 && (time - time_dim_seconds[idx1]) <= 1e-6 * (time_dim_seconds[idx1+1] - time_dim_seconds[idx1])
+            idx1 -= 1; idx2 = idx1 + 1
+        end
+        t1 = time_dim_seconds[idx1]; t2 = time_dim_seconds[idx2]; time_interval = t2 - t1
+        weight = (time_interval > 1e-9) ? (time - t1) / time_interval : 0.0
+    end
 
     # (state_field, standard_name, has_z). zeta is a 2-D field broadcast across z layers.
     fields = ((state.u, :u, true), (state.v, :v, true), (state.temperature, :temp, true),

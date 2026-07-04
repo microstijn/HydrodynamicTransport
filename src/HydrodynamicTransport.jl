@@ -13,6 +13,7 @@ include("VectorOperationsModule.jl")
 include("BoundaryConditionsModule.jl")
 include("HorizontalTransportModule.jl")
 include("VerticalTransportModule.jl")
+include("BreathingTransportModule.jl")
 include("SourceSinkModule.jl")
 include("Hydrodynamics.jl")
 

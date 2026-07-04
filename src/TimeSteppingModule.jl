@@ -118,7 +118,6 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         (grid isa CurvilinearGrid) || error("breathing mode requires a CurvilinearGrid")
         (ds !== nothing && hydro_data !== nothing) ||
             error("breathing mode requires ds + hydro_data (real hydro with a free surface)")
-        reverse_time && error("breathing + reverse_time is not yet supported")
         breathing_proj = build_projector(grid)
         breathing_work = build_breathing_work(grid)
     end
@@ -180,9 +179,13 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             # --- OPT-IN breathing-sigma step (no retry; dt chosen safe upfront). ---
             _copy_dynamic_state!(work, state)
             apply_boundary_conditions!(work, grid, boundary_conditions)
-            # Project for the read containing `time` (the corrected transports are per-read-constant),
-            # breathe the sigma metric, and set the GCL ω. Solved once per read (cadence guard inside).
-            update_hydrodynamics!(work, grid, ds, hydro_data, time; diagnose_w=false, projector=breathing_proj)
+            # Project for the read containing the REAL hydro time (per-read-constant transports); breathe
+            # the metric + set ω. In reverse-time mode the internal clock `time` is the LAG since the
+            # receptor pulse, so the real hydro time counts backward: htime = origin − time, and the
+            # projection negates u,v + swaps η (adjoint pass). Solved once per read (cadence guard inside).
+            htime = reverse_time ? reverse_time_origin - time : time
+            update_hydrodynamics!(work, grid, ds, hydro_data, htime; diagnose_w=false,
+                                  projector=breathing_proj, reverse=reverse_time)
             if breathing_proj.last_idx != last_padded_idx
                 pad_transports!(breathing_work, breathing_proj)
                 last_padded_idx = breathing_proj.last_idx
@@ -192,10 +195,24 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             cour = breathing_courant(breathing_proj, breathing_work)
             dt_safe = cour > 0.0 ? cfl_max / cour : dt_max
             trial_dt = min(trial_dt, dt_safe)
-            breathing_proj.t_read_end > time && (trial_dt = min(trial_dt, breathing_proj.t_read_end - time))
+            # Read-boundary clip: forward can't pass t_read_end; reverse can't pass t_read_start (htime
+            # decreases as the lag grows).
+            if reverse_time
+                htime > breathing_proj.t_read_start && (trial_dt = min(trial_dt, htime - breathing_proj.t_read_start))
+            else
+                breathing_proj.t_read_end > time && (trial_dt = min(trial_dt, breathing_proj.t_read_end - time))
+            end
             if trial_dt < 1e-9; break; end
+            # Sub-step start fraction within the read. Reverse mode walks the read backward, so f0 mirrors:
+            # forward f0 = (htime − t_start)/ΔT; reverse f0 = (t_end − htime)/ΔT (departure volume at htime).
             dT_read = breathing_proj.t_read_end - breathing_proj.t_read_start
-            f0 = dT_read > 0.0 ? (time - breathing_proj.t_read_start) / dT_read : 0.0
+            f0 = if dT_read <= 0.0
+                0.0
+            elseif reverse_time
+                (breathing_proj.t_read_end - htime) / dT_read
+            else
+                (htime - breathing_proj.t_read_start) / dT_read
+            end
             breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz)
             deposition = apply_settling!(work, grid, trial_dt, sediment_params)
             bed_exchange!(work, grid, trial_dt, deposition, sediment_params)

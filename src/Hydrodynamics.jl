@@ -164,7 +164,8 @@ function diagnose_vertical_velocity!(state::State, grid::CurvilinearGrid)
 end
 
 function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDataset, hydro_data::HydrodynamicData, time::Float64;
-                               diagnose_w::Bool=true, projector::Union{Nothing,BreathingProjector}=nothing)
+                               diagnose_w::Bool=true, projector::Union{Nothing,BreathingProjector}=nothing,
+                               reverse::Bool=false)
     ng = grid.ng
     cache = hydro_data.cache
     breathing = projector !== nothing
@@ -228,7 +229,7 @@ function update_hydrodynamics!(state::State, grid::CurvilinearGrid, ds::NCDatase
         # OPT-IN breathing-sigma continuity correction: solve the barotropic projection once per hydro
         # read, breathe the sigma metric to the free surface, and set the GCL ω (replaces the rigid-lid
         # w-diagnosis). See ProjectionModule + the plan.
-        _breathing_update!(state, grid, projector, cache, idx1, idx2, time_dim_seconds)
+        _breathing_update!(state, grid, projector, cache, idx1, idx2, time_dim_seconds; reverse=reverse)
     elseif diagnose_w
         # Files store no w/omega -> diagnose the vertical velocity from continuity so the sigma
         # transport has vertical advection (and preserves a uniform tracer). Disable with diagnose_w=false.
@@ -243,12 +244,35 @@ end
 # steps and rejected trials reuse the cached projection. At the clamped file ends (idx2==idx1) there
 # is no interval, so the previous projection is retained.
 function _breathing_update!(state::State, grid::CurvilinearGrid, projector::BreathingProjector,
-                            cache::HydroSlabCache, idx1::Int, idx2::Int, tsec::Vector{Float64})
+                            cache::HydroSlabCache, idx1::Int, idx2::Int, tsec::Vector{Float64};
+                            reverse::Bool=false)
+    ng = grid.ng
     slabs1 = cache.slabs[idx1]; slabs2 = cache.slabs[idx2]
     haskey(slabs1, :zeta) ||
         error("breathing mode requires a free surface (zeta/XE) in the hydro file; none detected")
     if idx2 != idx1 && projector.last_idx != idx1
-        eta_n = slabs1[:zeta]; eta_np1 = slabs2[:zeta]
+        # REVERSE-TIME / ADJOINT: negate the velocity and SWAP the bracketing surfaces (η_n↔η_np1). By
+        # the linearity of the projection (vetted: U*(−u,−∂η/∂t)=−U* exactly, and the D̃-weighted Poisson
+        # is self-adjoint), this yields −U*, −ω and the reversed volume chain (Hn↔Hnp) — which makes the
+        # breathing cascade the EXACT discrete adjoint of the forward step (machine precision for the
+        # unlimited linear scheme; the FCT limiter + wet/dry are the only reciprocity floors).
+        eta_n, eta_np1 = reverse ? (slabs2[:zeta], slabs1[:zeta]) : (slabs1[:zeta], slabs2[:zeta])
+        # Project the read using the MID-read velocity (mean of the two bracket slabs), NOT the current
+        # sub-step interpolation. This makes the forward pass (which enters the read near its start) and
+        # the reverse pass (which enters near its end) project the IDENTICAL transport — required for the
+        # reverse step to be the exact adjoint (agent-flagged transport-replay condition). C≡1 is
+        # velocity-independent, so this is safe; it is also more accurate (interval-representative).
+        if haskey(slabs1, :u) && haskey(slabs2, :u)
+            um = 0.5 .* (slabs1[:u] .+ slabs2[:u]); nxu, nyu, nzu = size(um)
+            view(state.u, ng+1:nxu+ng, ng+1:nyu+ng, 1:nzu) .= um
+        end
+        if haskey(slabs1, :v) && haskey(slabs2, :v)
+            vm = 0.5 .* (slabs1[:v] .+ slabs2[:v]); nxv, nyv, nzv = size(vm)
+            view(state.v, ng+1:nxv+ng, ng+1:nyv+ng, 1:nzv) .= vm
+        end
+        if reverse
+            @. state.u = -state.u; @. state.v = -state.v
+        end
         dt = tsec[idx2] - tsec[idx1]
         project!(projector, grid, state.u, state.v, eta_n, eta_np1, dt)
         rebuild_metrics!(grid, padded_depth!(projector, grid); d_floor=1.0)

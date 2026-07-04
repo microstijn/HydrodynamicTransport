@@ -8,6 +8,8 @@ using ..HydrodynamicTransport.ModelStructs
 using ..HydrodynamicTransport.HydrodynamicsModule
 using ..HydrodynamicTransport.HorizontalTransportModule
 using ..HydrodynamicTransport.VerticalTransportModule
+using ..HydrodynamicTransport.ProjectionModule: BreathingProjector, build_projector
+using ..HydrodynamicTransport.BreathingTransportModule
 using ..HydrodynamicTransport.SourceSinkModule
 using ..HydrodynamicTransport.BoundaryConditionsModule
 using ..HydrodynamicTransport.SettlingModule
@@ -63,6 +65,13 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         Kh::Float64=1.0,
                         Kz::Float64=1e-4,
                         D_crit::Float64=0.0,
+                        # --- OPT-IN breathing-sigma continuity correction (default false = rigid-lid, bit-identical).
+                        # Needs real hydro data (ds+hydro_data) with a free surface (zeta/XE). Replaces the transport
+                        # step with the projected breathing cascade; the adaptive dt is driven by the corrected-
+                        # transport Courant + read-boundary clip. `breathing_camb` = ambient tracer concentration
+                        # filled where the departure region exits the domain / crosses dry cells (0 = clean ocean).
+                        breathing::Bool=false,
+                        breathing_camb::Float64=0.0,
                         diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
                         # --- BACKWARD / ADJOINT mode (opt-in; forward path byte-identical when false) ---
                         # For a LINEAR passive tracer the adjoint transport is the same advection-diffusion
@@ -101,6 +110,18 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
     work = deepcopy(state)            # reusable trial buffer (replaces per-step deepcopy)
     time = effective_start_time
     current_dt = dt
+
+    # Breathing-sigma: build the projection workspace once (needs a curvilinear grid + real hydro).
+    local breathing_proj, breathing_work
+    last_padded_idx = -1
+    if breathing
+        (grid isa CurvilinearGrid) || error("breathing mode requires a CurvilinearGrid")
+        (ds !== nothing && hydro_data !== nothing) ||
+            error("breathing mode requires ds + hydro_data (real hydro with a free surface)")
+        reverse_time && error("breathing + reverse_time is not yet supported")
+        breathing_proj = build_projector(grid)
+        breathing_work = build_breathing_work(grid)
+    end
 
     min_dt_taken = Inf
     max_dt_taken = 0.0
@@ -155,6 +176,41 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
         trial_dt = min(trial_dt, dt_bound)
         if trial_dt < 1e-9; break; end
 
+        if breathing
+            # --- OPT-IN breathing-sigma step (no retry; dt chosen safe upfront). ---
+            _copy_dynamic_state!(work, state)
+            apply_boundary_conditions!(work, grid, boundary_conditions)
+            # Project for the read containing `time` (the corrected transports are per-read-constant),
+            # breathe the sigma metric, and set the GCL ω. Solved once per read (cadence guard inside).
+            update_hydrodynamics!(work, grid, ds, hydro_data, time; diagnose_w=false, projector=breathing_proj)
+            if breathing_proj.last_idx != last_padded_idx
+                pad_transports!(breathing_work, breathing_proj)
+                last_padded_idx = breathing_proj.last_idx
+            end
+            # Adaptive dt: the corrected-transport Courant keeps the cascade volumes positive; clip to
+            # the hydro-read boundary (stay within one projection) and the output/end bound (dt_bound).
+            cour = breathing_courant(breathing_proj, breathing_work)
+            dt_safe = cour > 0.0 ? cfl_max / cour : dt_max
+            trial_dt = min(trial_dt, dt_safe)
+            breathing_proj.t_read_end > time && (trial_dt = min(trial_dt, breathing_proj.t_read_end - time))
+            if trial_dt < 1e-9; break; end
+            dT_read = breathing_proj.t_read_end - breathing_proj.t_read_start
+            f0 = dT_read > 0.0 ? (time - breathing_proj.t_read_start) / dT_read : 0.0
+            breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz)
+            deposition = apply_settling!(work, grid, trial_dt, sediment_params)
+            bed_exchange!(work, grid, trial_dt, deposition, sediment_params)
+            source_sink_terms!(work, grid, sources, functional_interactions, time + trial_dt, trial_dt, D_crit)
+            if !isempty(virtual_oysters)
+                oysters_backup = deepcopy(virtual_oysters)
+                update_oysters!(work, grid, oysters_backup, trial_dt, oyster_tracers.dissolved, oyster_tracers.sorbed)
+                virtual_oysters = oysters_backup
+            end
+            state, work = work, state
+            min_dt_taken = min(min_dt_taken, trial_dt); max_dt_taken = max(max_dt_taken, trial_dt)
+            current_dt = dt_safe
+        end
+
+        if !breathing
         step_successful = false
         while !step_successful
             # Snapshot the committed state into the reusable trial buffer (no allocation),
@@ -226,10 +282,11 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                 end
             end
         end
-        
+        end  # if !breathing
+
         time += trial_dt
         state.time = time
-        
+
         if !isempty(receptor_monitors) && time >= next_receptor_monitor_time - 1e-9
             for monitor in receptor_monitors
                 write_receptor_monitor!(monitor, grid, state, time)

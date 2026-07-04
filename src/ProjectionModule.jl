@@ -77,6 +77,8 @@ mutable struct BreathingProjector
     omega::Array{Float64,3}  # vertical volume flux, bottom-up [m³/s] (nx,ny,nz+1)
     depth_pad::Matrix{Float64}  # padded floored depth for rebuild_metrics! (nx_tot,ny_tot)
     last_idx::Int            # bracket index of the last projection (cadence guard; -1 = none yet)
+    t_read_start::Float64    # time [s] at the start of the current hydro read (for the sub-step fraction)
+    t_read_end::Float64      # time [s] at the end of the current hydro read
     # --- linear solve scratch (COO reassembled per read; pattern is static) ---
     b::Vector{Float64}
 end
@@ -161,7 +163,7 @@ function build_projector(grid::CurvilinearGrid; h_open::Float64=30.0, wet_min::F
         dxo, dyo, dsig,
         zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny), zeros(nx, ny),
         zeros(nx+1, ny, nz), zeros(nx, ny+1, nz), zeros(nx, ny, nz+1),
-        zeros(nx_tot, ny_tot), -1,
+        zeros(nx_tot, ny_tot), -1, 0.0, 0.0,
         zeros(N))
 end
 

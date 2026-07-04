@@ -254,6 +254,7 @@ function _breathing_update!(state::State, grid::CurvilinearGrid, projector::Brea
         rebuild_metrics!(grid, padded_depth!(projector, grid); d_floor=1.0)
         write_omega_velocity!(projector, grid, state)
         projector.last_idx = idx1
+        projector.t_read_start = tsec[idx1]; projector.t_read_end = tsec[idx2]
     end
     return nothing
 end

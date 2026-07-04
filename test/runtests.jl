@@ -572,6 +572,12 @@ end
         # reverse_time solver flag: on a steady field it must reproduce forward-on-negated-field exactly.
         rt = bench_reverse_time_equivalence(:FFSL)
         @test rt.peak > 1e-6 && rt.rel < 1e-10              # plumbing: identical to machine precision
+        # LINEAR breathing sweep: reverse-time is the EXACT discrete adjoint (diag(varr)M = (diag(vdep)M̃)ᵀ)
+        # to machine precision, at any Courant, on the actual production kernel (no external data).
+        ak1 = bench_breathing_adjoint_kernel(amp=0.6, seed=1234)   # single-cell (Courant<1)
+        @test ak1.courant < 1.0 && ak1.rel < 1e-12                 # measured ~1e-16
+        ak2 = bench_breathing_adjoint_kernel(amp=3.0, seed=2)      # multi-cell (Courant>1)
+        @test ak2.courant > 1.0 && ak2.rel < 1e-12                 # exact regardless of Courant
     end
 
 end

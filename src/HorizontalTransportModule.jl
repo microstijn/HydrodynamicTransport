@@ -795,13 +795,37 @@ end
 # m). Writes the arrival volumes into `varr` (= vdep − ΔS, the next sweep's departure) and the updated
 # mixing ratio for physical cells into `cnew`. Monotone donor base + PPM antidiffusive correction,
 # Zalesak-limited to the local neighbour min/max; conservative (fluxes telescope), positive, C≡1-exact.
+#
+# `linear=true` selects the LOW-ORDER donor-cell flux only (no PPM reconstruction, no FCT limiter),
+# giving the pure first-order-upwind breathing sweep `cnew[g] = (vdep[g]·crow[g] − ΔFlo)/varr[g]`.
+# This operator is LINEAR in C, and (math-vetted: 3 independent agents + numerics) its reverse-time
+# form — negate the swept volumes `Srow` and use the arrival volumes as the next departure — is its
+# EXACT adjoint in the volume-weighted inner product `⟨Mc,y⟩_varr = ⟨c,M̃y⟩_vdep` (equivalently
+# `diag(varr)·M = (diag(vdep)·M̃)ᵀ`), at ANY Courant, provided every cell volume stays positive (the
+# sweep is structurally the geometric overlap-remap matrix, symmetric under time reversal). It is the
+# reciprocity/adjoint mode (Gate-1 sensitivity product). The default `linear=false` keeps the monotone
+# PPM+FCT scheme for the forward magnitude product (more accurate, but the FCT nonlinearity limits
+# reverse-time reciprocity to the ~%-level rather than machine precision).
 function _ffsl_line_breathing!(cnew, crow, vdep, varr, Srow, cL, cR, Flo, Fhi, Ctd, Rp, Rm,
-                               m::Int, ng::Int, nphys::Int; camb::Float64=0.0)
-    _ffsl_ppm_edges!(cL, cR, crow, m)
+                               m::Int, ng::Int, nphys::Int; camb::Float64=0.0, linear::Bool=false)
     @inbounds for g in 2:m-1
         varr[g] = vdep[g] - (Srow[g] - Srow[g-1])
     end
     @inbounds varr[1] = vdep[1]; varr[m] = vdep[m]
+    if linear
+        # Low-order donor-cell flux only (the exact self-adjoint operator). cL/cR/Fhi/Ctd/Rp/Rm unused.
+        @inbounds for f in 1:m-1
+            Flo[f] = _ffsl_flux_breathing(cL, cR, crow, vdep, m, f, Float64(Srow[f]), true, camb)
+        end
+        @inbounds Flo[m] = 0.0
+        @inbounds for ip in 1:nphys
+            g = ip + ng
+            vg = varr[g]
+            cnew[g] = vg > 0.0 ? (vdep[g]*crow[g] - (Flo[g] - Flo[g-1])) / vg : crow[g]
+        end
+        return nothing
+    end
+    _ffsl_ppm_edges!(cL, cR, crow, m)
     @inbounds for f in 1:m-1
         S = Float64(Srow[f])
         Flo[f] = _ffsl_flux_breathing(cL, cR, crow, vdep, m, f, S, true, camb)

@@ -80,7 +80,39 @@ to a file directly (NOT `| grep`, which buffers) and grep on read.
 
 ---
 
-## 2. IMPROVEMENT 1 — machine-precision reciprocity (unlimited-linear mode)
+## 2. IMPROVEMENT 1 — machine-precision reciprocity (unlimited-linear mode) — ✅ DONE (2026-07-04)
+
+**Status: implemented, math-vetted, committed.** Opt-in `breathing_linear` kwarg threads
+`run_simulation → breathing_transport! → _xsweep!/_ysweep! → _ffsl_line_breathing!(...; linear=true)`,
+which drops the PPM+FCT antidiffusive step and runs the pure first-order donor-cell flux. Default
+`false` = unchanged (137/137 bit-identical; suite now 139/139 with 2 new adjoint asserts).
+
+**Vetting (3 independent math agents, unanimous + numerically reproduced):** the linear breathing
+donor-cell sweep is the **exact discrete adjoint** of its reverse-time form (negate the swept volumes
+`Srow`, use the arrival volumes as the reverse departure) in the volume-weighted inner product
+`diag(varr)·M = (diag(vdep)·M̃)ᵀ` — the sweep is structurally the geometric **overlap-remap matrix**,
+symmetric under time reversal. Exact at **ANY Courant** (single- or multi-cell), the only condition
+being every cell volume stays positive (`vdep>0, varr>0`) — cleaner/stronger than the "Courant<1"
+framing below. Kernel unit test `bench_breathing_adjoint_kernel` (no external data) → **2.2e-16** at
+single- AND multi-cell Courant.
+
+**Real-grid end-to-end (`production_reciprocity.jl`, updated):** linear mode + the adjoint-consistent
+inner product (weight the forward output by V(t1), the reverse by V(t0) — only the two END volumes
+survive the cascade) gives **rel err ~1.5e-4, a 26× improvement over the 0.40% baseline**. The residual
+is NOT the horizontal scheme (exactly self-adjoint) — it is the **VERTICAL implicit backward-Euler
+advection**, which is only a first-order (O(dt)) adjoint: `Aᵀ` carries the ARRIVAL volume on its
+diagonal but the reverse run carries the DEPARTURE volume (differ by `dt·diag(ω[k+1]−ω[k])`). CONFIRMED
+by exact dt-halving of the residual (1.16e-4 → 5.83e-5 → 2.92e-5) and by Kz=0 leaving it unchanged (it
+is the ω term, not diffusion). **This corrects the note below/[[backward-adjoint-reciprocity]]: the
+vertical SPATIAL matrix `A(−ω)=A(ω)ᵀ` is symmetric, but the full time-STEP operator is not adjoint-exact
+when the column breathes.** → new **Improvement 3** (§4b): a vertical FFSL overlap-remap for ω-advection
+(exactly adjoint at any Courant, like the horizontal) + CN diffusion would take the 3D end-to-end to
+machine precision. Only needed if the Gate-1 product wants full-3D machine-precision reciprocity;
+1.5e-4 is already excellent, and the horizontal (dominant) transport is exact.
+
+---
+
+### Original design notes (superseded by the DONE status above, kept for context)
 
 **Why:** reciprocity is 0.40% because the Zalesak **FCT limiter is nonlinear** (no single transpose).
 The linear operator is provably an EXACT self-adjoint (agents: `A(−U*)`/`A(−ω)` = transpose given the

@@ -25,6 +25,8 @@
 using HydrodynamicTransport
 using HydrodynamicTransport.ModelStructs
 using NCDatasets
+using Random
+using LinearAlgebra
 
 # relative L2 mismatch of two equal-length series (guarded against a zero forward signal)
 function _rel_l2(f::AbstractVector, g::AbstractVector)
@@ -152,4 +154,63 @@ function bench_reverse_time_equivalence(scheme::Symbol=:FFSL)
                          Kh=Kh, Kz=Kz, tmax=tmax, dt=dt, reverse_time=true, origin=tmax)   # reverse_time on original
     d = maximum(abs.(F_ref .- F_rev)); scale = maximum(abs.(F_ref))
     return (scheme=scheme, maxabs=d, rel=scale > 0 ? d / scale : d, peak=scale)
+end
+
+# Build the LINEAR breathing sweep operator as an explicit nphys×nphys matrix by applying the production
+# kernel `_ffsl_line_breathing!` (linear mode) to each physical-cell unit basis vector. Departure volumes
+# `vd`, swept volumes `Ss` (closed line: 0 at the physical-block boundary faces). Top-level (NOT a nested
+# closure — a nested closure mis-inferred the scratch and silently corrupted the second call's result).
+function _breathing_sweep_matrix(vd::Vector{Float64}, Ss::Vector{Float64}, m::Int, ng::Int, nphys::Int)
+    _line = HydrodynamicTransport.HorizontalTransportModule._ffsl_line_breathing!
+    M = zeros(nphys, nphys)
+    for j in 1:nphys
+        crow = zeros(m); crow[j+ng] = 1.0
+        varr_s = zeros(m); cL = zeros(m); cR = zeros(m); Flo = zeros(m); Fhi = zeros(m)
+        Ctd = zeros(m); Rp = zeros(m); Rm = zeros(m); Srow = copy(Ss)
+        _line(crow, crow, vd, varr_s, Srow, cL, cR, Flo, Fhi, Ctd, Rp, Rm, m, ng, nphys;
+              camb=0.0, linear=true)
+        for i in 1:nphys; M[i, j] = crow[i+ng]; end
+    end
+    return M
+end
+
+# bench_breathing_adjoint_kernel(; nphys, ng, seed, amp) -> (resid, rel, courant, nphys)
+#
+# MACHINE-PRECISION adjoint of the LINEAR (`linear=true`) breathing donor-cell sweep, tested directly on
+# the production kernel `_ffsl_line_breathing!` with NO external data. Builds the sweep operator M on a
+# closed 1-D breathing line (random departure volumes vdep>0, a smooth swept-volume profile S that
+# vanishes a buffer of cells inside the physical block so the donor walk never touches a ghost cell) and
+# its reverse-time form Mt (negate S, use the arrival volumes varr as the reverse departure), each as an
+# explicit nphys x nphys matrix. Returns the volume-weighted transpose residual
+# max|diag(varr)M - (diag(vdep)Mt)ᵀ|, which is ~machine-zero — the exact discrete-adjoint property
+# (math-vetted by 3 independent agents: exact at any Courant while every cell volume stays positive).
+# `amp` scales the peak Courant (amp<1 => single-cell; amp>1 => multi-cell).
+function bench_breathing_adjoint_kernel(; nphys::Int=48, ng::Int=2, seed::Int=1234, amp::Float64=0.6)
+    m = nphys + 2ng
+    rng = MersenneTwister(seed)
+    vdep = 0.5 .+ 1.5 .* rand(rng, m)                    # departure volumes in [0.5, 2.0]
+    vmin = minimum(vdep)
+    # Smooth swept-volume profile S[f] = amp*vmin*sin(2π(f-lo)/(hi-lo)) on the interior faces lo..hi, 0
+    # elsewhere: vanishes at both ends (a closed line, matching the abstract S[0]=S[m]=0 model), has a
+    # small face-to-face slope (so all arrival volumes stay positive), yet reaches Courant≈amp at its
+    # peak and changes sign (both walk directions). `buffer` keeps the donor walk clear of the ghosts.
+    buffer = max(3, ceil(Int, amp) + 2)
+    lo = ng + buffer; hi = m - ng - buffer
+    S = zeros(m)
+    for f in lo:hi
+        S[f] = amp * vmin * sinpi(2 * (f - lo) / (hi - lo))
+    end
+    varr = copy(vdep)
+    for g in 2:m-1; varr[g] = vdep[g] - (S[g] - S[g-1]); end
+    @assert all(>(0.0), varr) "test setup produced a non-positive arrival volume (widen the line)"
+    peak_courant = maximum(abs(S[f]) / min(vdep[f], vdep[f+1]) for f in 1:m-1)
+
+    M  = _breathing_sweep_matrix(vdep, S, m, ng, nphys)   # forward operator
+    Mt = _breathing_sweep_matrix(varr, -S, m, ng, nphys)  # reverse-time: departure = forward arrival, swept = -S
+    a = varr[(ng+1):(ng+nphys)]; d = vdep[(ng+1):(ng+nphys)]
+    LHS = Diagonal(a) * M
+    RHS = permutedims(Diagonal(d) * Mt)
+    resid = maximum(abs.(LHS .- RHS))
+    scale = maximum(abs.(LHS))
+    return (resid=resid, rel=(scale > 0 ? resid / scale : resid), courant=peak_courant, nphys=nphys)
 end

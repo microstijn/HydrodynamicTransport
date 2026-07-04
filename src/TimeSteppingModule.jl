@@ -72,6 +72,10 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                         # filled where the departure region exits the domain / crosses dry cells (0 = clean ocean).
                         breathing::Bool=false,
                         breathing_camb::Float64=0.0,
+                        # First-order-upwind (exact self-adjoint) breathing horizontal sweeps instead of the
+                        # default monotone PPM+FCT: use for the reverse-time reciprocity/adjoint product
+                        # (machine-precision transpose). No effect unless `breathing=true`.
+                        breathing_linear::Bool=false,
                         diagnose_vertical_velocity::Bool=true,  # diagnose omega from continuity when files lack w
                         # --- BACKWARD / ADJOINT mode (opt-in; forward path byte-identical when false) ---
                         # For a LINEAR passive tracer the adjoint transport is the same advection-diffusion
@@ -213,7 +217,7 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
             else
                 (htime - breathing_proj.t_read_start) / dT_read
             end
-            breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz)
+            breathing_transport!(work, breathing_proj, breathing_work, grid, trial_dt, f0; camb=breathing_camb, Kz=Kz, linear=breathing_linear)
             deposition = apply_settling!(work, grid, trial_dt, sediment_params)
             bed_exchange!(work, grid, trial_dt, deposition, sediment_params)
             source_sink_terms!(work, grid, sources, functional_interactions, time + trial_dt, trial_dt, D_crit)

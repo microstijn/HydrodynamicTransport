@@ -163,23 +163,24 @@ end
 end
 
 # One breathing FFSL x-sweep along every y-row (departure volume field `vdep`, swept volume Uxf·dtc,
-# ambient camb). Updates C's physical x-cells in place. `s` = the per-task scratch tuple.
-function _xsweep!(C, vdep, Uxf, dtc, camb, s, mx, my, ng, nx, nz)
+# ambient camb). Updates C's physical x-cells in place. `s` = the per-task scratch tuple. `linear`
+# selects the first-order-upwind (exact-adjoint) flux; false = the monotone PPM+FCT scheme.
+function _xsweep!(C, vdep, Uxf, dtc, camb, s, mx, my, ng, nx, nz, linear)
     @inbounds for k in 1:nz, jg in 1:my
         for g in 1:mx; s.crow[g] = Float64(C[g, jg, k]); s.Srow[g] = Uxf[g, jg, k] * dtc; end
         _ffsl_line_breathing!(view(s.crow,1:mx), view(s.crow,1:mx), view(vdep,:,jg,k), view(s.varr,1:mx),
             view(s.Srow,1:mx), view(s.cL,1:mx), view(s.cR,1:mx), view(s.Flo,1:mx), view(s.Fhi,1:mx),
-            view(s.Ctd,1:mx), view(s.Rp,1:mx), view(s.Rm,1:mx), mx, ng, nx; camb=camb)
+            view(s.Ctd,1:mx), view(s.Rp,1:mx), view(s.Rm,1:mx), mx, ng, nx; camb=camb, linear=linear)
         for ip in 1:nx; C[ip+ng, jg, k] = s.crow[ip+ng]; end
     end
 end
 # One breathing FFSL y-sweep along every x-column.
-function _ysweep!(C, vdep, Uyf, dtc, camb, s, mx, my, ng, ny, nz)
+function _ysweep!(C, vdep, Uyf, dtc, camb, s, mx, my, ng, ny, nz, linear)
     @inbounds for k in 1:nz, ig in 1:mx
         for g in 1:my; s.crow[g] = Float64(C[ig, g, k]); s.Srow[g] = Uyf[ig, g, k] * dtc; end
         _ffsl_line_breathing!(view(s.crow,1:my), view(s.crow,1:my), view(vdep,ig,:,k), view(s.varr,1:my),
             view(s.Srow,1:my), view(s.cL,1:my), view(s.cR,1:my), view(s.Flo,1:my), view(s.Fhi,1:my),
-            view(s.Ctd,1:my), view(s.Rp,1:my), view(s.Rm,1:my), my, ng, ny; camb=camb)
+            view(s.Ctd,1:my), view(s.Rp,1:my), view(s.Rm,1:my), my, ng, ny; camb=camb, linear=linear)
         for jp in 1:ny; C[ig, jp+ng, k] = s.crow[jp+ng]; end
     end
 end
@@ -211,7 +212,7 @@ C≡1 check, 0 for the clean-ocean pathogen tracer). Mutates `state.tracers` in 
 """
 function breathing_transport!(state::State, proj::BreathingProjector, bw::BreathingWork,
                               grid::CurvilinearGrid, dt::Float64, f0::Float64;
-                              camb::Float64=0.0, Kz::Float64=1e-4)
+                              camb::Float64=0.0, Kz::Float64=1e-4, linear::Bool=false)
     ng, nx, ny, nz = bw.ng, proj.nx, proj.ny, proj.nz
     mx, my = bw.mx, bw.my
     _update_cascade_volumes!(bw, proj, dt, f0)
@@ -235,11 +236,11 @@ function breathing_transport!(state::State, proj::BreathingProjector, bw::Breath
         while ti <= ntr
             C = state.tracers[tracer_names[ti]]
             # Strang split ½x · ½y · z · ½y · ½x, threading the cascade departure volumes V0..V4.
-            _xsweep!(C, V0, Uxf, hdt, camb, s, mx, my, ng, nx, nz)
-            _ysweep!(C, V1, Uyf, hdt, camb, s, mx, my, ng, ny, nz)
+            _xsweep!(C, V0, Uxf, hdt, camb, s, mx, my, ng, nx, nz, linear)
+            _ysweep!(C, V1, Uyf, hdt, camb, s, mx, my, ng, ny, nz, linear)
             _zsweep!(C, proj, V2, dt, Kz, s, ng, nx, ny, nz)
-            _ysweep!(C, V3, Uyf, hdt, camb, s, mx, my, ng, ny, nz)
-            _xsweep!(C, V4, Uxf, hdt, camb, s, mx, my, ng, nx, nz)
+            _ysweep!(C, V3, Uyf, hdt, camb, s, mx, my, ng, ny, nz, linear)
+            _xsweep!(C, V4, Uxf, hdt, camb, s, mx, my, ng, nx, nz, linear)
             ti += nchunks
         end
     end

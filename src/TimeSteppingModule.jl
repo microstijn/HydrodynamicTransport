@@ -334,7 +334,25 @@ function run_simulation(grid::AbstractGrid, initial_state::State, sources::Vecto
                 # scratch/flux buffers are reconstructable on the fly from the source .nc via
                 # update_hydrodynamics!. Keeps the "state" key + `.tracers` so readers (e.g. E1) are
                 # unchanged. NOTE: not a valid restart checkpoint (no hydro/buffers).
-                jldsave(output_filename; state=(; tracers=state.tracers, time=state.time))
+                if breathing
+                    # Breathing mode: also save the CASCADE-consistent column depth D_out at this output
+                    # instant so a downstream reader can form a MASS-consistent kernel (the tracer C=m/V is
+                    # stored against the breathing volume, not the frozen H0). The transport conserves C·V in
+                    # V=area·Δσ·H(f), H(f)=Hn+f·(Hnp−Hn) at the sub-step fraction — NOT the mid-read proj.D.
+                    # At the output time the arrival fraction is f_end=(time−t_read_start)/ΔT_read, so
+                    # D_out=H(f_end) is the exact instantaneous depth whose volume carries the saved mass.
+                    # (zeta is dropped from tracer_only output, so the depth cannot be recovered otherwise.)
+                    p = breathing_proj
+                    dTr = p.t_read_end - p.t_read_start
+                    fend = dTr > 0.0 ? (time - p.t_read_start) / dTr : 0.0
+                    bdepth = Matrix{Float64}(undef, p.nx, p.ny)
+                    @inbounds for j in 1:p.ny, i in 1:p.nx
+                        bdepth[i, j] = p.wet[i, j] ? (p.Hn[i, j] + fend * (p.Hnp[i, j] - p.Hn[i, j])) : 0.0
+                    end
+                    jldsave(output_filename; state=(; tracers=state.tracers, time=state.time, breathing_depth=bdepth))
+                else
+                    jldsave(output_filename; state=(; tracers=state.tracers, time=state.time))
+                end
             else
                 jldsave(output_filename; state=state, virtual_oysters=virtual_oysters)
             end

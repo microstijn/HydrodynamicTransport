@@ -61,7 +61,10 @@ let h = [r.dx for r in hd], e = [r.L2 for r in hd]
     lines!(ax3, h, guide(h, e[1], h[1], 2); linestyle=:dash, color=:gray, label="slope 2")
 end
 scatterlines!(ax3, [r.dz for r in vd], [r.L2 for r in vd]; label="vertical (CN)")
-axislegend(ax3; position=:rb)
+# Legend at bottom-right sat directly on top of the horizontal-diffusion series, hiding two of its
+# three markers (the horizontal dx values are an order of magnitude larger than the vertical dz, so
+# that series lives in the bottom-right corner). Top-left is the empty quadrant here.
+axislegend(ax3; position=:lt, framevisible=false)
 
 save(joinpath(outdir, "solver_validation_convergence.pdf"), fig1)
 println("wrote ", joinpath(outdir, "solver_validation_convergence.pdf"))

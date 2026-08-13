@@ -182,12 +182,50 @@ The model uses a structured, staggered **Arakawa 'C' grid**. Scalar quantities (
 ### Numerical Implementation
 
 #### Horizontal Transport (`HorizontalTransportModule.jl`)
-*   **Advection**: Implemented using either the Bott (1989) TVD scheme or a 3rd-order upstream scheme.
+*   **Advection**: four schemes are available via the `scheme` argument.
+    *   `:FFSL` — conservative **flux-form semi-Lagrangian** (Lin and Rood, 1996) in directional
+        splitting, with a piecewise-parabolic sub-grid reconstruction under the Colella–Woodward
+        monotonicity constraint, flux-corrected against a donor-cell base (Zalesak, 1979).
+        Second-order accurate, positive-definite and peak-preserving; stable at advective Courant
+        numbers above 1. **This is the scheme used for the PREVIR kernel campaign**, and the one the
+        benchmark table below is quoted from.
+    *   `:TVD` — Bott (1989) total-variation-diminishing scheme.
+    *   `:UP3` — 3rd-order upstream-biased scheme.
+    *   `:ImplicitADI` — alternating-direction implicit solve.
 *   **Diffusion**: Solved with an explicit scheme.
 
 #### Vertical Transport (`VerticalTransportModule.jl`)
-*   **Advection**: Solved with an explicit, first-order upwind scheme.
+*   **Advection**: first-order upwind, solved **implicitly**, so it is unconditionally stable at
+    vertical Courant numbers well above unity.
 *   **Diffusion**: Solved with a numerically stable implicit Crank-Nicolson scheme, which avoids the strict time step limitations of an explicit solver.
+
+#### Validation
+
+`test/runtests.jl` runs the benchmark suite in `test/benchmarks/`, which validates each operator
+against cases with known analytical solutions and writes the result tables deposited at the repository
+root (`advection_validation_results.csv`, `diffusion_validation_results.csv`,
+`vertical_validation_results.csv`). The advection table carries **all three explicit horizontal
+schemes at three resolutions**, so `:FFSL` can be compared against `:TVD` and `:UP3` directly.
+Headline results for `:FFSL`:
+
+| test | metric | result |
+|---|---|---|
+| uniform translation | empirical order *p* | 2.01 (successive L2 ratios 4.03, 4.05) |
+| solid-body rotation, 1 revolution | peak retention | 0.96, no negative values |
+| rotation at Courant 3 | peak retention | 0.98 (stable) |
+| Zalesak slotted cylinder | min / max | 0.0 / 0.998 (no spurious over/undershoot) |
+| all advection tests | relative mass drift | 1e-9 to 5e-9 |
+
+Two caveats the table cannot state: the monotonicity limiters reduce the formal third-order
+reconstruction to second order at smooth extrema, and the conservation floor is set by
+single-precision tracer storage rather than by the scheme.
+
+**Rigid-lid caveat.** Cell volumes and face areas are held at the reference bathymetry and do not
+breathe with the free surface, which enters only as a wet/dry gate. The diagnosed vertical velocity
+therefore closes the discrete volume budget for the depth-integrated non-divergent flow (residual
+~1e-16) but leaves a barotropic tidal column convergence uncompensated. A mass-consistent
+("breathing") reformulation that restores discrete continuity is implemented in
+`BreathingTransportModule.jl` and is opt-in.
 
 #### Sources & Sinks (`SourceSinkModule.jl`)
 *   Flexibly handles point sources and includes a simple first-order decay model for specific tracers.

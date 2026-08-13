@@ -29,7 +29,11 @@ The specific advection algorithm is chosen via the `scheme` argument.
 - `state::State`: The model state, which is modified in-place.
 - `grid::AbstractGrid`: The computational grid.
 - `dt::Float64`: The time step duration.
-- `scheme::Symbol`: The advection scheme to use. Options are `:TVD`, `:UP3`, and `:ImplicitADI`.
+- `scheme::Symbol`: The advection scheme to use. Options are `:FFSL`, `:TVD`, `:UP3`, and
+  `:ImplicitADI`. `:FFSL` is the conservative flux-form semi-Lagrangian scheme of Lin and Rood (1996),
+  with a piecewise-parabolic (Colella--Woodward) sub-grid reconstruction flux-corrected against a
+  donor-cell base (Zalesak 1979); it is second-order accurate, positive-definite and peak-preserving,
+  and is the scheme the PREVIR kernel campaign runs on.
 - `D_crit::Float64`: Critical depth for wet/dry cells.
 - `boundary_conditions::Vector{<:BoundaryCondition}`: A vector of boundary conditions.
 
@@ -116,7 +120,7 @@ function horizontal_transport!(state::State, grid::AbstractGrid, dt::Float64, sc
             diffuse_y!(C_initial, C_intermediate, state, grid, dt, Kh, D_crit)
         end
     else
-        error("Unknown advection scheme: $scheme. Available options are :TVD, :UP3, and :ImplicitADI.")
+        error("Unknown advection scheme: $scheme. Available options are :FFSL, :TVD, :UP3, and :ImplicitADI.")
     end
     return nothing
 end

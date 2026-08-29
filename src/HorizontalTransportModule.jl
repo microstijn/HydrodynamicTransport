@@ -286,6 +286,25 @@ Calculates the coefficients of a 4th-order polynomial that interpolates the
 concentration profile over a 5-point stencil. This is a core component of the
 Bott (1989) advection scheme.
 
+These are Bott (1989) Table 1, the `l = 4` row, verbatim — the unique quartic through the
+five node values, in the normalised coordinate `x' = (x - x_i)/dx` on `[-1/2, 1/2]` of his
+Eq (6).
+
+CORRECTED 2026-08-29 against the paper. Three of the five expressions did not match Table 1:
+`a0` was `c_i - a4` where Bott has `psi_j`; `a1` was `(c_ip1 - c_im1)/2`, which is Bott's
+`l = 2` row and not `l = 4`; `a2` was set equal to `a4`, a different combination entirely
+(their signs on the neighbours are opposite); and `a3` carried an extra `-(2/3)*a1` term
+that appears nowhere in the paper. Only `a4` was right.
+
+The consequences were not subtle, and the tests now pin them. The old coefficients could not
+reproduce a LINEAR profile — on `[1,2,3,4,5]` they produced a spurious cubic and gave 3.417
+at `x' = +1/2` where the exact value is 3.5 — returned ALL FIVE COEFFICIENTS ZERO for a pure
+quadratic, and INVERTED the curvature on a peaked profile. A reconstruction that cannot
+represent a straight line is not fourth-order.
+
+Note this branch (`:TVD`) is not the certified path: `advection_scheme` defaults to `:FFSL`
+at every entry point, so no published number depended on it.
+
 # Arguments
 - `c_im2`, `c_im1`, `c_i`, `c_ip1`, `c_ip2`: Concentration values at five consecutive
   grid points (i-2, i-1, i, i+1, i+2).
@@ -294,10 +313,11 @@ Bott (1989) advection scheme.
 - `(a0, a1, a2, a3, a4)`: A tuple of the five polynomial coefficients.
 """
 @inline function calculate_bott_coeffs(c_im2, c_im1, c_i, c_ip1, c_ip2)
-    a1 = (c_ip1 - c_im1) / 2.0
-    a3 = (c_ip2 - 2*c_ip1 + 2*c_im1 - c_im2) / 12.0 - (2/3.0) * a1
-    a4 = (c_ip2 - 4*c_ip1 + 6*c_i - 4*c_im1 + c_im2) / 24.0
-    a0 = c_i - a4; a2 = a4
+    a0 =   c_i
+    a1 = (-c_ip2 +  8*c_ip1           -  8*c_im1 + c_im2) / 12.0
+    a2 = (-c_ip2 + 16*c_ip1 - 30*c_i  + 16*c_im1 - c_im2) / 24.0
+    a3 = ( c_ip2 -  2*c_ip1           +  2*c_im1 - c_im2) / 12.0
+    a4 = ( c_ip2 -  4*c_ip1 +  6*c_i  -  4*c_im1 + c_im2) / 24.0
     return a0, a1, a2, a3, a4
 end
 
@@ -323,8 +343,33 @@ end
 """
     advect_x_tvd!(C_out, C_in, u, grid, dt)
 
-Performs advection in the x-direction using a Total Variation Diminishing (TVD)
-scheme based on the work of Bott (1989).
+Performs advection in the x-direction using the integrated-flux scheme of Bott (1989),
+with a flux limiter of ours on top.
+
+NAMING CAVEAT, recorded 2026-08-29. The symbol `:TVD` and this function's name overstate
+what the cited paper provides. Bott (1989) is titled "A Positive Definite Advection Scheme
+Obtained by Nonlinear Renormalization of the Advective Fluxes", and the strings "TVD",
+"total variation", "limiter" and "monotonic" appear ZERO times in it. Positive-definiteness
+is strictly weaker than TVD: it forbids negative values, not new extrema. Bott's own
+limiting is a `max(0, .)` clip on each directional flux plus a normalisation by the total
+outflow (his Eqs 13-14), sufficient only for non-negativity; there is no ratio of
+consecutive gradients anywhere in the paper. He also declines the stability guarantee the
+label implies: "the scheme preserves numerical stability except in strong deformational
+flow fields where slight instabilities may occur".
+
+What IS Bott's, and is implemented faithfully below, is the flux construction: the advective
+flux is the ANALYTIC INTEGRAL of the sub-grid polynomial over the donor volume that crosses
+the face in one step (his Eq 8, integrating from -1/2 to -1/2 + Courant), giving Eq 9. Even
+that form he attributes to Tremback et al. (1987) — "advective fluxes are computed utilizing
+the integrated flux form of Tremback et al." — with his own contribution being the
+normalisation and nonlinear limiting that make it positive definite. The Courant clip at 1
+is his too: "the integrals in (7) and (8) are only defined for Courant numbers not exceeding
+one".
+
+The ratio-of-consecutive-gradients limiter blended with first-order upwind below is a
+standard Sweby/Roe-lineage construction and is OURS. It may well deliver the monotonicity
+this docstring used to claim, but that has to be demonstrated for this implementation, not
+inherited by citation.
 
 This function calculates advective fluxes across x-faces. For the deep interior of
 the domain, it employs a high-order method:
@@ -332,8 +377,8 @@ the domain, it employs a high-order method:
 2.  This polynomial is analytically integrated over the volume of fluid that crosses
     the cell face during the time step to calculate a high-order flux.
 3.  A flux limiter (`phi`) is calculated to blend the high-order flux with a
-    low-order (1st-order upwind) flux. This ensures that the scheme is TVD,
-    preventing the formation of new, unphysical oscillations.
+    low-order (1st-order upwind) flux, to suppress new oscillations. (Ours, not
+    Bott's — see the naming caveat above.)
 4.  The final flux is constrained to be between the concentrations of the donor
     and receiver cells to maintain monotonicity.
 

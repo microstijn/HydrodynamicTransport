@@ -102,6 +102,40 @@ end
 
 @testset "HydrodynamicTransport.jl" begin
 
+    # Bott (1989) Table 1, l = 4: the unique quartic through the five node values. Added
+    # 2026-08-29 after a citation audit found three of the five coefficients did not match
+    # the paper. The old expressions passed every existing test while being unable to
+    # reproduce a straight line, so exactness on low-order profiles is what needs pinning.
+    @testset "Bott sub-grid reconstruction is exact on low-order profiles" begin
+        bc = HydrodynamicTransport.HorizontalTransportModule.calculate_bott_coeffs
+        poly(a, x) = a[1] + a[2]*x + a[3]*x^2 + a[4]*x^3 + a[5]*x^4
+        # Nodes sit at x' = -2, -1, 0, 1, 2 in the normalised coordinate of Bott Eq (6).
+        nodes = (-2.0, -1.0, 0.0, 1.0, 2.0)
+        for f in (x -> 3.0,                    # constant
+                  x -> 2.0 + 1.5x,             # linear
+                  x -> 1.0 - 0.5x + 0.75x^2,   # quadratic
+                  x -> x^3 - 2x,               # cubic
+                  x -> 0.25x^4 - x^2 + 1.0)    # quartic
+            a = bc(f.(nodes)...)
+            # The reconstruction must reproduce the generating polynomial everywhere in the
+            # cell, not merely at the nodes.
+            for x in range(-0.5, 0.5, length = 11)
+                @test poly(a, x) ≈ f(x) atol = 1e-10
+            end
+            # And it must interpolate the cell-centre value: Bott's a0 is psi_j exactly.
+            @test a[1] ≈ f(0.0) atol = 1e-12
+        end
+        # The specific failures of the superseded coefficients, as explicit guards.
+        a_lin = bc(1.0, 2.0, 3.0, 4.0, 5.0)
+        @test poly(a_lin, 0.5) ≈ 3.5 atol = 1e-12      # was 3.4167
+        @test a_lin[4] ≈ 0.0 atol = 1e-12              # was -2/3, a spurious cubic
+        a_quad = bc(4.0, 1.0, 0.0, 1.0, 4.0)           # psi = x^2
+        @test a_quad[3] ≈ 1.0 atol = 1e-12             # was 0.0: the quadratic was annihilated
+        a_peak = bc(0.1, 0.6, 1.0, 0.6, 0.1)
+        @test a_peak[3] < 0.0                          # concave; the old sign was positive
+        @test a_peak[1] ≈ 1.0 atol = 1e-12             # node value was lost
+    end
+
     @testset "Flux limiters" begin
         # phi(1) == 1 for the symmetric limiters; phi(r<0) == 0 (TVD region).
         for f in (van_leer, minmod, mc)
